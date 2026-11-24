@@ -5,7 +5,7 @@ import warnings
 
 import pytest
 
-from PIL import Image, PsdImagePlugin
+from PIL import Image, ImageSequence, PsdImagePlugin
 
 from .helper import (
     assert_image_equal,
@@ -61,32 +61,34 @@ def test_invalid_file() -> None:
 
 
 def test_n_frames() -> None:
-    with Image.open("Tests/images/hopper_merged.psd") as im:
+    with Image.open("Tests/images/negative_layer_count.psd") as im:
         assert isinstance(im, PsdImagePlugin.PsdImageFile)
-        assert im.n_frames == 1
-        assert not im.is_animated
+        assert im.n_frames == 3
+        assert im.is_animated
 
-    for path in [test_file, "Tests/images/negative_layer_count.psd"]:
-        with Image.open(path) as im:
-            assert isinstance(im, PsdImagePlugin.PsdImageFile)
-            assert im.n_frames == 2
-            assert im.is_animated
+    with Image.open(test_file) as im:
+        assert isinstance(im, PsdImagePlugin.PsdImageFile)
+        assert im.n_frames == 3
+        assert im.is_animated
 
 
 def test_eoferror() -> None:
     with Image.open(test_file) as im:
         assert isinstance(im, PsdImagePlugin.PsdImageFile)
-
-        # PSD seek index starts at 1 rather than 0
-        n_frames = im.n_frames + 1
+        n_frames = im.n_frames
 
         # Test seeking past the last frame
-        with pytest.raises(EOFError):
+        with pytest.raises(EOFError, match="attempt to seek outside sequence"):
             im.seek(n_frames)
         assert im.tell() < n_frames
 
         # Test that seeking to the last frame does not raise an error
         im.seek(n_frames - 1)
+
+    # Test seeking past the last frame without calling n_frames first
+    with Image.open(test_file) as im:
+        with pytest.raises(EOFError, match="no more images in PSD file"):
+            im.seek(3)
 
     # Test seeking past the last frame without calling n_frames first
     with Image.open(test_file) as im:
@@ -97,18 +99,15 @@ def test_eoferror() -> None:
 def test_seek_tell() -> None:
     with Image.open(test_file) as im:
         layer_number = im.tell()
-        assert layer_number == 1
+        assert layer_number == 0
 
-        with pytest.raises(EOFError):
-            im.seek(0)
+        im.seek(0)
+        layer_number = im.tell()
+        assert layer_number == 0
 
         im.seek(1)
         layer_number = im.tell()
-        assert layer_number == 1
-
-        im.seek(2)
-        layer_number = im.tell()
-    assert layer_number == 2
+    assert layer_number == 1
 
 
 def test_seek_back_to_initial_frame() -> None:
@@ -116,10 +115,54 @@ def test_seek_back_to_initial_frame() -> None:
     with Image.open(test_file) as im:
         initial_frame = im.copy()
 
-        im.seek(2)
         im.seek(1)
+        im.seek(0)
 
         assert_image_equal(im, initial_frame)
+
+
+def test_composite() -> None:
+    with Image.open("Tests/images/composite.psd") as im:
+        assert isinstance(im, PsdImagePlugin.PsdImageFile)
+        assert im.get_flattened_data() == ((0, 255, 0), (255, 0, 0))
+        assert len(im.layers) == 2
+        assert im.n_frames == 3
+
+        # Frame 0 is the composite image, and the remaining frames are layers.
+        composite = im.copy()
+        frames = []
+        iterator = ImageSequence.Iterator(im)
+        for frame_index, frame in enumerate(iterator):
+            assert frame_index == im.tell()
+            frames.append(frame.copy())
+
+        with pytest.raises(StopIteration):
+            next(iterator)
+
+        assert len(frames) == im.n_frames == 3
+        assert frames[0] == composite
+        assert frames[0].get_flattened_data() == ((0, 255, 0), (255, 0, 0))
+        assert frames[1].mode == "RGBA"
+        assert frames[1].get_flattened_data() == (
+            (255, 255, 0, 0),
+            (255, 255, 0, 0),
+        )
+        assert frames[2].mode == "RGB"
+        assert frames[2].get_flattened_data() == ((0, 255, 0), (0, 0, 0))
+        assert frames[1] != composite
+        assert frames[2] != composite
+
+        assert [layer.name for layer in im.layers] == ["Background", "Layer"]
+        assert [layer.box for layer in im.layers] == [
+            (0, 0, 2, 1),
+            (0, 0, 1, 1),
+        ]
+        assert [layer.mode for layer in im.layers] == ["RGBA", "RGB"]
+
+    # Seeking directly to a smaller layer must not retain composite pixels.
+    with Image.open("Tests/images/composite.psd") as im:
+        im.seek(2)
+        assert im.get_flattened_data() == ((0, 255, 0), (0, 0, 0))
 
 
 def test_seek_mode_change() -> None:
@@ -160,7 +203,7 @@ def test_negative_top_left_layer() -> None:
 def test_layer_skip() -> None:
     with Image.open("Tests/images/five_channels.psd") as im:
         assert isinstance(im, PsdImagePlugin.PsdImageFile)
-        assert im.n_frames == 1
+        assert im.n_frames == 2
 
 
 def test_icc_profile() -> None:
@@ -254,7 +297,7 @@ def test_layer_crashes(test_file: str) -> None:
 def test_bounds_crash(test_file: str) -> None:
     with Image.open(test_file) as im:
         assert isinstance(im, PsdImagePlugin.PsdImageFile)
-        im.seek(im.n_frames)
+        im.seek(im.n_frames - 1)
 
         with pytest.raises(ValueError):
             im.load()
@@ -265,4 +308,4 @@ def test_bounds_crash_overflow() -> None:
         assert isinstance(im, PsdImagePlugin.PsdImageFile)
         im.load()
         with pytest.raises(ValueError, match="negative tile size"):
-            im.seek(im.n_frames)
+            im.seek(im.n_frames - 1)

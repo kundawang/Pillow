@@ -17,10 +17,14 @@ TODO
 Backwards incompatible changes
 ==============================
 
-TODO
-^^^^
+PSD frame zero is the composite image
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-TODO
+For PSD images with layer records, frame 0 is now the stored composite image.
+Frames 1 onward are the layers in their original order, and
+:attr:`~PIL.Image.Image.n_frames` includes the composite frame. Consequently,
+:class:`~PIL.ImageSequence.Iterator` starts with the composite and then visits
+each layer. PSD files without layer records continue to expose a single frame.
 
 Deprecations
 ============

@@ -1702,6 +1702,14 @@ PSD
 
 Pillow identifies and reads PSD files written by Adobe Photoshop 2.5 and 3.0.
 
+Frame 0 is the composite image. Subsequent frames are the individual layers in
+their original order.
+
+.. versionchanged:: 13.1.0
+
+    Frame numbering starts at 0 with the composite image. Previously, the
+    opened image used frame number 1 even though it contained the composite.
+
 SUN
 ^^^
 
