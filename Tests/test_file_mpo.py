@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 import warnings
 from io import BytesIO
 from typing import Any
@@ -12,6 +13,7 @@ from PIL import (
     JpegImagePlugin,
     MpoImagePlugin,
     TiffImagePlugin,
+    TiffTags,
     _binary,
 )
 
@@ -171,7 +173,166 @@ def test_truncated_makernote() -> None:
     ):
         ifd = TiffImagePlugin.ImageFileDirectory_v2()
         ifd[34665] = {37500: data}
-        check(ifd)
+        with pytest.warns(UserWarning, match="Possibly corrupt EXIF MakerNote"):
+            check(ifd)
+
+
+def _load_makernote(data: bytes) -> Image.Exif:
+    ifd = TiffImagePlugin.ImageFileDirectory_v2()
+    ifd[34665] = {37500: data}
+    fp = BytesIO()
+    ifd.save(fp)
+    exif = Image.Exif()
+    exif.load(fp.getvalue())
+    return exif
+
+
+def _fujifilm_entries(*entries: tuple[int, int, int, bytes]) -> bytes:
+    return b"".join(
+        _binary.o16le(ifd_tag) + _binary.o16le(typ) + _binary.o32le(count) + entry_data
+        for ifd_tag, typ, count, entry_data in entries
+    )
+
+
+def _fujifilm_makernote(
+    entries: bytes, payload: bytes = b"", tag_count: int | None = None
+) -> bytes:
+    if tag_count is None:
+        tag_count = len(entries) // 12
+    return (
+        b"FUJIFILM" + _binary.o32le(12) + _binary.o16le(tag_count) + entries + payload
+    )
+
+
+def test_fujifilm_makernote_shared_offset() -> None:
+    # Two tags legitimately sharing the same offset, plus an inline short value
+    # and an unknown tag type. All of it fits within the MakerNote.
+    offset = 12 + 2 + 4 * 12
+    payload = bytes(range(8))
+    data = _fujifilm_makernote(
+        _fujifilm_entries(
+            (1, TiffTags.ASCII, 4, b"abc\0"),
+            (2, TiffTags.LONG, 2, _binary.o32le(offset)),
+            (3, TiffTags.UNDEFINED, 4, b"\x01\x02\x03\x04"),
+            (4, 0xFFFF, 4, b"xxxx"),
+        ),
+        payload,
+    )
+
+    exif = _load_makernote(data)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        makernote = exif.get_ifd(37500)
+
+    assert makernote[1] == "abc"
+    assert makernote[2] == (0x03020100, 0x07060504)
+    assert makernote[3] == b"\x01\x02\x03\x04"
+    # Unknown tag types are ignored, just as other EXIF readers do
+    assert 4 not in makernote
+
+    # A second tag at the same offset is read again, not dropped
+    shared_offset = 12 + 2 + 2 * 12
+    shared = _fujifilm_makernote(
+        _fujifilm_entries(
+            (1, TiffTags.LONG, 2, _binary.o32le(shared_offset)),
+            (2, TiffTags.LONG, 2, _binary.o32le(shared_offset)),
+        ),
+        payload,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        makernote = _load_makernote(shared).get_ifd(37500)
+    assert makernote == {1: (0x03020100, 0x07060504), 2: (0x03020100, 0x07060504)}
+
+
+def test_fujifilm_makernote_duplicate_offset() -> None:
+    # Two LONG tags that contain the same offset
+    tag_numbers = (1, 2)
+    offset = 8 + 4 + 2 + len(tag_numbers) * 12
+    data = _fujifilm_makernote(
+        _fujifilm_entries(
+            *[(tag, TiffTags.LONG, 16, _binary.o32le(offset)) for tag in tag_numbers]
+        ),
+        bytes(range(16 * 4)),
+    )
+
+    exif = _load_makernote(data)
+    with pytest.warns(UserWarning, match="Tag data larger than MakerNote"):
+        makernote = exif.get_ifd(37500)
+    assert makernote[1] == struct.unpack("<16L", bytes(range(64)))
+    assert 2 not in makernote
+
+
+def test_fujifilm_makernote_out_of_bounds_offset() -> None:
+    offset = 12 + 2 + 3 * 12
+    payload = bytes(range(8))
+    data = _fujifilm_makernote(
+        _fujifilm_entries(
+            (1, TiffTags.LONG, 2, _binary.o32le(offset + 100)),
+            (2, TiffTags.LONG, 2, _binary.o32le(0)),
+            (3, TiffTags.LONG, 2, _binary.o32le(offset)),
+        ),
+        payload,
+    )
+
+    exif = _load_makernote(data)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        makernote = exif.get_ifd(37500)
+
+    # The valid tag is still parsed, the invalid ones are skipped
+    assert makernote == {3: (0x03020100, 0x07060504)}
+    messages = [str(warning.message) for warning in caught]
+    assert len(messages) == 2
+    assert all("Skipping tag" in message for message in messages)
+
+
+def test_fujifilm_makernote_truncated() -> None:
+    data = (
+        b"FUJIFILM"
+        + _binary.o32le(12)
+        + _binary.o16le(5)  # Five tags, but only one fits
+        + _fujifilm_entries((1, TiffTags.LONG, 1, _binary.o32le(7)))
+    )
+
+    exif = _load_makernote(data)
+    with pytest.warns(UserWarning, match="Possibly corrupt EXIF MakerNote data"):
+        makernote = exif.get_ifd(37500)
+    assert makernote == {1: 7}
+
+
+def test_fujifilm_makernote_invalid_ifd_offset() -> None:
+    data = b"FUJIFILM" + _binary.o32le(0xFFFFFFFF) + _binary.o16le(1)
+    exif = _load_makernote(data)
+    with pytest.warns(UserWarning, match="Invalid IFD offset"):
+        assert exif.get_ifd(37500) == {}
+
+
+def test_fujifilm_makernote_roundtrip() -> None:
+    offset = 12 + 2 + 2 * 12
+    data = _fujifilm_makernote(
+        _fujifilm_entries(
+            (1, TiffTags.ASCII, 4, b"abc\0"),
+            (2, TiffTags.LONG, 2, _binary.o32le(offset)),
+        ),
+        bytes(range(8)),
+    )
+
+    exif = _load_makernote(data)
+    makernote = exif.get_ifd(37500)
+    assert makernote == {1: "abc", 2: (0x03020100, 0x07060504)}
+
+    # The MakerNote survives the public Exif round trip
+    reloaded = Image.Exif()
+    reloaded.load(exif.tobytes())
+    assert reloaded.get_ifd(37500) == makernote
+
+    # ... and saving as TIFF, then reading it back
+    out = BytesIO()
+    Image.new("RGB", (1, 1)).save(out, "TIFF", exif=exif.tobytes())
+    out.seek(0)
+    with Image.open(out) as im:
+        assert im.getexif().get_ifd(37500) == makernote
 
 
 def test_reload_exif_after_seek() -> None:

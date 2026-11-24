@@ -131,3 +131,13 @@ not bundled into the wheels, so the system zlib was used at runtime instead, and
 Pillow 13.0.0 also failed to import on systems where ``libz.so.1`` was not on the
 default library search path, such as NixOS. Linux wheels no longer require a
 system zlib, and gain the speed of zlib-ng as macOS and Windows wheels already did.
+
+Fujifilm MakerNote tag validation
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When reading a Fujifilm MakerNote, the tag count, types, lengths and offsets are
+now validated against the size of the MakerNote itself. Tags that are truncated,
+reference data outside the MakerNote, or together ask for more data than the
+MakerNote contains are skipped with a warning, while the remaining valid tags are
+still parsed. Legitimate shared offsets and unknown tag types continue to be
+handled as before.

@@ -4284,6 +4284,86 @@ class Exif(_ExifBase):
             ifd[tag] = value
         return b"Exif\x00\x00" + head + ifd.tobytes(offset)
 
+    def _parse_fujifilm_makernote(self, tag_data: bytes) -> dict[int, Any]:
+        """Parse Fujifilm MakerNote tag data.
+
+        Tag data offsets are relative to the start of the MakerNote. Values
+        that point outside the MakerNote are skipped with a warning, so that
+        repeated or truncated offsets cannot read beyond it.
+        """
+        from .TiffImagePlugin import ImageFileDirectory_v2
+
+        makernote: dict[int, Any] = {}
+        if len(tag_data) < 12:
+            warnings.warn(
+                "Possibly corrupt EXIF MakerNote data.  "
+                f"Expecting to read 12 bytes but only got {len(tag_data)}."
+            )
+            return makernote
+
+        ifd_offset = i32le(tag_data, 8)
+        if ifd_offset < 12 or ifd_offset + 2 > len(tag_data):
+            warnings.warn(
+                "Possibly corrupt EXIF MakerNote data.  "
+                f"Invalid IFD offset {ifd_offset} for {len(tag_data)} bytes."
+            )
+            return makernote
+
+        ifd_data = tag_data[ifd_offset:]
+        (tag_count,) = struct.unpack("<H", ifd_data[:2])
+        # The tag directory, at 12 bytes per entry, must fit in the MakerNote
+        if 2 + tag_count * 12 > len(ifd_data):
+            warnings.warn(
+                "Possibly corrupt EXIF MakerNote data.  "
+                f"Expecting to read {2 + tag_count * 12} bytes but only got "
+                f"{len(ifd_data)}."
+            )
+            tag_count = (len(ifd_data) - 2) // 12
+
+        # The MakerNote itself is the budget for all tag values
+        budget = len(ifd_data)
+        for i in range(tag_count):
+            ifd_tag, typ, count, entry_data = struct.unpack(
+                "<HHL4s", ifd_data[i * 12 + 2 : (i + 1) * 12 + 2]
+            )
+            try:
+                unit_size, handler = ImageFileDirectory_v2._load_dispatch[typ]
+            except KeyError:
+                # Unknown type, like other EXIF readers, ignore the tag
+                continue
+            size = count * unit_size
+            if size > 4:
+                (offset,) = struct.unpack("<L", entry_data)
+                # Values should fit within the MakerNote, even before
+                # accounting for overlaps
+                budget -= size
+                if budget < 0:
+                    warnings.warn(
+                        f"Tag data larger than MakerNote. Skipping tag {ifd_tag}"
+                    )
+                    continue
+                # Offsets are relative to the start of the MakerNote, so an
+                # offset within the 12 byte header cannot point at tag data.
+                # A negative start would otherwise wrap around the slice.
+                start = offset - 12
+                data = ifd_data[start : start + size] if start >= 0 else b""
+            else:
+                data = entry_data[:size]
+
+            if len(data) != size:
+                warnings.warn(
+                    "Possibly corrupt EXIF MakerNote data.  "
+                    f"Expecting to read {size} bytes but only got {len(data)}. "
+                    f"Skipping tag {ifd_tag}"
+                )
+                continue
+
+            if not data:
+                continue
+
+            makernote[ifd_tag] = handler(ImageFileDirectory_v2(), data, False)
+        return dict(self._fixup_dict(makernote))
+
     def get_ifd(self, tag: int) -> dict[int, Any]:
         if tag not in self._ifds:
             if tag == ExifTags.IFD.IFD1:
@@ -4307,44 +4387,13 @@ class Exif(_ExifBase):
                     from .TiffImagePlugin import ImageFileDirectory_v2
 
                     try:
+                        if isinstance(tag_data, str):
+                            tag_data = tag_data.encode("latin-1", "replace")
+                        elif not isinstance(tag_data, bytes):
+                            # Not raw MakerNote data, so there is nothing to parse
+                            tag_data = b""
                         if tag_data.startswith(b"FUJIFILM"):
-                            ifd_offset = i32le(tag_data, 8)
-                            ifd_data = tag_data[ifd_offset:]
-
-                            makernote = {}
-                            for i in range(struct.unpack("<H", ifd_data[:2])[0]):
-                                ifd_tag, typ, count, data = struct.unpack(
-                                    "<HHL4s", ifd_data[i * 12 + 2 : (i + 1) * 12 + 2]
-                                )
-                                try:
-                                    (
-                                        unit_size,
-                                        handler,
-                                    ) = ImageFileDirectory_v2._load_dispatch[typ]
-                                except KeyError:
-                                    continue
-                                size = count * unit_size
-                                if size > 4:
-                                    (offset,) = struct.unpack("<L", data)
-                                    data = ifd_data[offset - 12 : offset + size - 12]
-                                else:
-                                    data = data[:size]
-
-                                if len(data) != size:
-                                    warnings.warn(
-                                        "Possibly corrupt EXIF MakerNote data.  "
-                                        f"Expecting to read {size} bytes but only got "
-                                        f"{len(data)}. Skipping tag {ifd_tag}"
-                                    )
-                                    continue
-
-                                if not data:
-                                    continue
-
-                                makernote[ifd_tag] = handler(
-                                    ImageFileDirectory_v2(), data, False
-                                )
-                            self._ifds[tag] = dict(self._fixup_dict(makernote))
+                            self._ifds[tag] = self._parse_fujifilm_makernote(tag_data)
                         elif self.get(0x010F) == "Nintendo":
                             makernote = {}
                             for i in range(struct.unpack(">H", tag_data[:2])[0]):
