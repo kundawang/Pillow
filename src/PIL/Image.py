@@ -2067,7 +2067,8 @@ class Image:
                 scale, offset = _getscaleoffset(lut)  # type: ignore[arg-type]
                 return self._new(self.im.point_transform(scale, offset))
             # for other modes, convert the function to a table
-            flatLut = [lut(i) for i in range(256)] * self.im.bands  # type: ignore[arg-type]
+            bands = self.im.bands if mode is None else getmodebands(mode)
+            flatLut = [lut(i) for i in range(256)] * bands  # type: ignore[arg-type]
         else:
             flatLut = lut
 

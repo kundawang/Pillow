@@ -54,6 +54,17 @@ Two new image processing operations are available in ImageOps.
 Other changes
 =============
 
+Point lookup tables for multiband output modes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When calling :py:meth:`~PIL.Image.Image.point` on an "L" or "P" image with a
+multiband output ``mode`` ("LA", "PA", "RGB" or "RGBA"), the 256-entry lookup
+table segments are now applied to the correct channels of the output image.
+Previously, the alpha segment of "LA" and "PA" lookups was misplaced, and
+passing the image's own mode explicitly (for example, ``im.point(lut, "RGB")``
+on an "RGB" image) scrambled the channels. A callable ``lut`` combined with an
+output ``mode`` now also builds a table with one segment per output band.
+
 Scaling empty text
 ^^^^^^^^^^^^^^^^^^
 

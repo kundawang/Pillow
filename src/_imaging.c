@@ -1784,13 +1784,20 @@ _point_impl(ImagingObject *self, PyObject *args) {
 
         if (mode == IMAGING_MODE_I) {
             im = ImagingPoint(self->image, mode, (void *)data);
-        } else if (mode && bands > 1) {
+        } else if (mode && bands > 1 && self->image->bands == 1) {
+            /* map a single-band 8-bit source to a multiband image;
+               interleave the lut to match the output mode's channel layout */
             for (i = 0; i < 256; i++) {
                 lut[i * 4] = CLIP8(data[i]);
-                lut[i * 4 + 1] = CLIP8(data[i + 256]);
-                lut[i * 4 + 2] = CLIP8(data[i + 512]);
-                if (n > 768) {
-                    lut[i * 4 + 3] = CLIP8(data[i + 768]);
+                if (bands == 2) {
+                    /* 2-band images (LA, PA) are stored as LXXA */
+                    lut[i * 4 + 1] = 0;
+                    lut[i * 4 + 2] = 0;
+                    lut[i * 4 + 3] = CLIP8(data[i + 256]);
+                } else {
+                    lut[i * 4 + 1] = CLIP8(data[i + 256]);
+                    lut[i * 4 + 2] = CLIP8(data[i + 512]);
+                    lut[i * 4 + 3] = (bands > 3) ? CLIP8(data[i + 768]) : 0;
                 }
             }
             im = ImagingPoint(self->image, mode, (void *)lut);

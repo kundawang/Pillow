@@ -54,6 +54,70 @@ def test_multiband(mode: str) -> None:
     assert_image_equal(out, expected)
 
 
+@pytest.mark.parametrize("mode", ("LA", "PA", "RGB", "RGBA"))
+def test_l_to_multiband(mode: str) -> None:
+    # every input value, including the 0 and 255 extremes
+    im = Image.frombytes("L", (16, 16), bytes(range(256)))
+
+    bands = Image.getmodebands(mode)
+    band_luts = [
+        [(v * (b + 2) + 13 * b) % 256 for v in range(256)] for b in range(bands)
+    ]
+    lut = [v for band_lut in band_luts for v in band_lut]
+
+    out = im.point(lut, mode)
+
+    # reference: apply each 256-entry segment as a separate grayscale mapping
+    expected = Image.merge(mode, [im.point(band_lut) for band_lut in band_luts])
+    assert_image_equal(out, expected)
+
+
+@pytest.mark.parametrize("mode", ("LA", "PA", "RGB", "RGBA"))
+def test_l_to_multiband_identity(mode: str) -> None:
+    im = hopper("L")
+    lut = list(range(256)) * Image.getmodebands(mode)
+
+    out = im.point(lut, mode)
+
+    expected = Image.merge(mode, [im] * Image.getmodebands(mode))
+    assert_image_equal(out, expected)
+
+
+@pytest.mark.parametrize("mode", ("LA", "PA", "RGB", "RGBA"))
+def test_l_to_multiband_wrong_length(mode: str) -> None:
+    im = Image.new("L", (1, 1))
+    lut = list(range(256)) * Image.getmodebands(mode)
+
+    with pytest.raises(ValueError):
+        im.point(lut[:-1], mode)
+    with pytest.raises(ValueError):
+        im.point(lut + [0], mode)
+
+
+def test_l_to_multiband_callable() -> None:
+    im = hopper("L")
+    out = im.point(lambda x: 255 - x, "RGB")
+
+    expected = Image.merge("RGB", [im.point(lambda x: 255 - x)] * 3)
+    assert_image_equal(out, expected)
+
+
+def test_p_to_pa_palette() -> None:
+    im = hopper("P")
+    out = im.point(list(range(256)) * 2, "PA")
+
+    assert out.mode == "PA"
+    assert out.getpalette() == im.getpalette()
+
+
+def test_explicit_same_mode() -> None:
+    # passing the current mode explicitly must not change the mapping
+    im = hopper("RGB")
+    lut = [(x + 1) % 256 for x in range(256)] * 3
+
+    assert_image_equal(im.point(lut, "RGB"), im.point(lut))
+
+
 @pytest.mark.parametrize("mode", ("I;16", "I;16L", "I;16B", "I;16N"))
 def test_16bit(mode: str) -> None:
     im = Image.new(mode, (1, 1), 0x1234)
