@@ -131,3 +131,16 @@ not bundled into the wheels, so the system zlib was used at runtime instead, and
 Pillow 13.0.0 also failed to import on systems where ``libz.so.1`` was not on the
 default library search path, such as NixOS. Linux wheels no longer require a
 system zlib, and gain the speed of zlib-ng as macOS and Windows wheels already did.
+
+Memory leak when merging a single band with a mismatched mode
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:py:func:`~PIL.Image.merge` with a single band whose mode does not match the
+requested mode, such as ``Image.merge("F", [Image.new("L", (1, 1))])``, raised
+:py:exc:`ValueError` but leaked the memory allocated for the output image. This
+has been fixed.
+
+The internal allocation and ownership of new pixel buffers in the C core has also
+been consolidated: copy, conversion, blur and the Tk bridge now allocate through
+one explicit allocator/ownership path, ensuring error paths release their buffers
+and never expose partially initialised memory.
