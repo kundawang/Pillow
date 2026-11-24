@@ -216,6 +216,15 @@ Fixed drawing on I;16B images
 When drawing on an ``I;16B`` image, some drawing methods wrote in the wrong byte order.
 All drawing operations now use the byte order of the image mode.
 
+Fixed convolution filters on signed I mode images
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Convolution kernels (such as :py:class:`~PIL.ImageFilter.Kernel` and the built-in
+:py:mod:`~PIL.ImageFilter` kernels) applied to an ``I`` mode image previously clamped
+every negative result to zero. The ``I`` mode is a signed 32-bit integer mode, so
+negative results are now preserved, with values outside the signed 32-bit range
+clamped to it instead. Other modes are unaffected.
+
 Fixed histograms for masked LA, La and PA images
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

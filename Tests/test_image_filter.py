@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import pytest
 
@@ -251,7 +252,16 @@ def test_consistency_i16(size: int, mode: str) -> None:
     kernel = ImageFilter.Kernel((size, size), EMBOSS_MATRIX[size], 0.3)
     reference = hopper("I").filter(kernel)
     result = hopper(mode).filter(kernel)
-    assert_image_equal(result.convert("I"), reference)
+    # Mode "I" is signed 32-bit and keeps negative convolution results, while
+    # the unsigned 16-bit I;16 modes clamp to their [0, 65535] range. Clamp
+    # the signed reference to the I;16 range so the shared accumulation path
+    # is still compared over every value both modes can represent.
+    clamped = Image.new("I", reference.size)
+    for y in range(reference.height):
+        for x in range(reference.width):
+            value = cast("int", reference.getpixel((x, y)))
+            clamped.putpixel((x, y), max(0, min(65535, value)))
+    assert_image_equal(result.convert("I"), clamped)
 
 
 @pytest.mark.parametrize("mode", ("I;16", "I;16L", "I;16B", "I;16N"))
@@ -263,6 +273,81 @@ def test_consistency_i16_high_byte(mode: str) -> None:
     for _ in range(5):
         im = im.filter(ImageFilter.SMOOTH)
         assert im.getpixel((4, 4)) == 1000
+
+
+def test_signed_i_keeps_negative_results() -> None:
+    # Mode "I" is signed 32-bit: convolution results below zero must be
+    # preserved instead of being clamped to zero.
+    #
+    # 5x5 image with a mixed positive/negative neighborhood:
+    #   -10 -10 -10 -10 -10
+    #   -10   1   2   3 -10
+    #   -10   4   5   6 -10
+    #   -10   7   8   9 -10
+    #   -10 -10 -10 -10 -10
+    data = [
+        -10, -10, -10, -10, -10,
+        -10, 1, 2, 3, -10,
+        -10, 4, 5, 6, -10,
+        -10, 7, 8, 9, -10,
+        -10, -10, -10, -10, -10,
+    ]  # fmt: skip
+    im = Image.new("I", (5, 5))
+    im.putdata(data)
+
+    # SMOOTH is a 3x3 kernel (weights 1,1,1 / 1,5,1 / 1,1,1, scale 13).
+    smoothed = im.filter(ImageFilter.SMOOTH)
+
+    # Center (2,2): weighted sum of 1..9 is 45 plus an extra 4*5 for the
+    # center weight 5 -> 65; 65 / 13 = 5 exactly.
+    assert smoothed.getpixel((2, 2)) == 5
+    # (1,1) neighborhood sums to -38; -38 / 13 = -2.92..., and the shared
+    # +0.5 rounding bias truncates toward zero to -2 (negative, not zero).
+    assert smoothed.getpixel((1, 1)) == -2
+    # The one-pixel border is copied verbatim, negatives included.
+    assert smoothed.getpixel((0, 0)) == -10
+    assert smoothed.getpixel((4, 2)) == -10
+
+    # An all-negative image keeps negative interior values under a 5x5 BLUR.
+    # BLUR has twelve unit weights (rows of 5, 2, 2, 2, 5) and scale 16, so
+    # each coefficient is the exact binary32 value 0.0625. The row sums are
+    # -31.25, -12.5, -12.5, -12.5 and -31.25; accumulating them with the
+    # +0.5 bias gives -99.5, which truncates toward zero to -99.
+    negative = Image.new("I", (7, 7), -100).filter(ImageFilter.BLUR)
+    assert negative.getpixel((3, 3)) == -99
+    # The two-pixel BLUR border is copied unchanged.
+    assert negative.getpixel((0, 0)) == -100
+    assert negative.getpixel((1, 3)) == -100
+
+    # A custom kernel producing a negative result from positive pixels.
+    edge_kernel = ImageFilter.Kernel(
+        (3, 3), (-1, -1, -1, -1, 0, -1, -1, -1, -1), scale=1
+    )
+    edged = Image.new("I", (5, 5), 10).filter(edge_kernel)
+    # 8 neighbors of 10, each weighted -1 -> -80; +0.5 truncates to -79.
+    assert edged.getpixel((2, 2)) == -79
+    assert edged.getpixel((0, 0)) == 10
+
+
+def test_signed_i_clamps_to_32bit_range() -> None:
+    int32_min = -(2**31)
+    int32_max = 2**31 - 1
+
+    # High bound: nine INT32_MAX values summed must clamp to INT32_MAX.
+    im_max = Image.new("I", (3, 3), int32_max)
+    out_max = im_max.filter(ImageFilter.Kernel((3, 3), [1] * 9, scale=1))
+    assert out_max.getpixel((1, 1)) == int32_max
+
+    # Low bound: a fully negative kernel over INT32_MAX must reach INT32_MIN.
+    out_min = im_max.filter(ImageFilter.Kernel((3, 3), [-1] * 9, scale=1))
+    assert out_min.getpixel((1, 1)) == int32_min
+
+    # Limit values survive on the border, which is copied without clamping.
+    border = Image.new("I", (3, 3))
+    border.putdata([int32_min, 0, int32_max, 0, 0, 0, int32_max, 0, int32_min])
+    bordered = border.filter(ImageFilter.SMOOTH)
+    assert bordered.getpixel((0, 0)) == int32_min
+    assert bordered.getpixel((2, 0)) == int32_max
 
 
 @pytest.mark.parametrize("size", (-1, math.nan, math.inf, 2**31))

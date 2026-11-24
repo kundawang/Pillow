@@ -28,6 +28,7 @@
 #include "Imaging.h"
 
 #define INT32_MAX_F 2147483647.0F
+#define INT32_MIN_F (-2147483648.0F)
 
 static inline UINT8
 clip8(float in) {
@@ -47,8 +48,9 @@ clip16(float in) {
 
 static inline INT32
 clip32(float in) {
-    // Clamp the low bound branchlessly (maxss).
-    in = in < 0.0f ? 0.0f : in;
+    // Mode "I" stores signed 32-bit integers, so clamp to the full
+    // [INT32_MIN, INT32_MAX] range instead of clipping negatives to zero.
+    in = in < INT32_MIN_F ? INT32_MIN_F : in;
     // Must explicitly return INT32_MAX for the high bound
     // to avoid incorrect overflow to INT_MIN.
     return in >= INT32_MAX_F ? INT32_MAX : (INT32)in;
