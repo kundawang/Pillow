@@ -324,7 +324,12 @@ ImagingMerge(const ModeID mode, Imaging bands[4]) {
     }
 
     if (bandsCount == 1) {
-        return ImagingCopy2(imOut, firstBand);
+        if (!ImagingCopy2(imOut, firstBand)) {
+            /* imOut was allocated above and is still owned by us */
+            ImagingDelete(imOut);
+            return NULL;
+        }
+        return imOut;
     }
 
     // restrict safe: the input bands are read-only and imOut is a fresh

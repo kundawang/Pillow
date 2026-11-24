@@ -54,6 +54,14 @@ Two new image processing operations are available in ImageOps.
 Other changes
 =============
 
+Fixed memory leak in Image.merge
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When :py:func:`~PIL.Image.merge` was called with a single band whose mode did
+not match the requested output mode, the partially allocated output image was
+not freed before the :py:exc:`ValueError` was raised. Repeated failed calls no
+longer grow memory usage.
+
 Scaling empty text
 ^^^^^^^^^^^^^^^^^^
 
