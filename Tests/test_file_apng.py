@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import struct
 from io import BytesIO
 
 import pytest
 
-from PIL import Image, ImageSequence, PngImagePlugin
+from PIL import Image, ImageFile, ImageSequence, PngImagePlugin
 
 TYPE_CHECKING = False
 if TYPE_CHECKING:
@@ -472,6 +473,136 @@ def test_apng_sequence_errors(test_file: str) -> None:
             assert isinstance(im, PngImagePlugin.PngImageFile)
             im.seek(im.n_frames - 1)
             im.load()
+
+
+def _make_apng_bytes() -> tuple[BytesIO, list[tuple[bytes, bytes]]]:
+    red = Image.new("RGBA", (4, 4), (255, 0, 0, 255))
+    green = Image.new("RGBA", (4, 4), (0, 255, 0, 255))
+    out = BytesIO()
+    red.save(out, "PNG", save_all=True, append_images=[green])
+    data = out.getvalue()
+
+    chunks = []
+    i = len(PngImagePlugin._MAGIC)
+    while i < len(data):
+        (length,) = struct.unpack(">I", data[i : i + 4])
+        cid = data[i + 4 : i + 8]
+        chunks.append((cid, data[i : i + 12 + length]))
+        i += 12 + length
+    return BytesIO(data), chunks
+
+
+def _rebuild(chunks: list[tuple[bytes, bytes]]) -> BytesIO:
+    return BytesIO(PngImagePlugin._MAGIC + b"".join(raw for _, raw in chunks))
+
+
+def _ihdr_chunk(width: int, height: int) -> tuple[bytes, bytes]:
+    out = BytesIO()
+    PngImagePlugin.putchunk(
+        out, b"IHDR", struct.pack(">II", width, height) + b"\x08\x06\x00\x00\x00"
+    )
+    return b"IHDR", out.getvalue()
+
+
+def test_apng_duplicate_ihdr_after_first_frame() -> None:
+    # A second IHDR spliced in after the first frame must not overwrite the
+    # canvas size or frame state; consuming the malformed stream raises a
+    # clear error instead of treating the bogus header as valid
+    _, chunks = _make_apng_bytes()
+    broken = []
+    for cid, raw in chunks:
+        broken.append((cid, raw))
+        if cid == b"IDAT":
+            broken.append(_ihdr_chunk(16, 16))
+
+    with Image.open(_rebuild(broken)) as im:
+        assert isinstance(im, PngImagePlugin.PngImageFile)
+        assert im.size == (4, 4)
+        assert im.n_frames == 2
+        # seeking into later frames hits the invalid extra IHDR
+        with pytest.raises(SyntaxError, match="multiple IHDR chunks"):
+            im.seek(1)
+            im.load()
+
+
+def test_apng_duplicate_ihdr_keeps_canvas_size() -> None:
+    # The duplicate IHDR claims a different size; the reported size must
+    # always follow the first IHDR
+    _, chunks = _make_apng_bytes()
+    broken = []
+    for cid, raw in chunks:
+        broken.append((cid, raw))
+        if cid == b"IDAT":
+            broken.append(_ihdr_chunk(8, 8))
+
+    with Image.open(_rebuild(broken)) as im:
+        assert im.size == (4, 4)
+        with pytest.raises(SyntaxError):
+            im.seek(1)
+            im.load()
+        # the size was never changed by the duplicate IHDR
+        assert im.size == (4, 4)
+
+
+def test_apng_invalid_sequence_in_memory() -> None:
+    # Corrupt the second fcTL sequence number; seek must report the error
+    _, chunks = _make_apng_bytes()
+    broken = []
+    fctl_count = 0
+    for cid, raw in chunks:
+        if cid == b"fcTL":
+            fctl_count += 1
+            if fctl_count == 2:
+                body = raw[8:-4]
+                body = struct.pack(">I", 99) + body[4:]
+                crc = PngImagePlugin._crc32(body, PngImagePlugin._crc32(cid))
+                raw = raw[:8] + body + struct.pack(">I", crc)
+        broken.append((cid, raw))
+
+    with Image.open(_rebuild(broken)) as im:
+        assert isinstance(im, PngImagePlugin.PngImageFile)
+        assert im.size == (4, 4)
+        # the bad sequence number is reached while consuming later frames
+        with pytest.raises(SyntaxError, match="frame sequence errors"):
+            im.seek(1)
+            im.load()
+
+
+def test_apng_duplicate_ihdr_truncated_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    # In truncated mode the extra IHDR is ignored and both frames stay usable
+    monkeypatch.setattr(ImageFile, "LOAD_TRUNCATED_IMAGES", True)
+    _, chunks = _make_apng_bytes()
+    broken = []
+    for cid, raw in chunks:
+        broken.append((cid, raw))
+        if cid == b"IDAT":
+            broken.append(_ihdr_chunk(16, 16))
+
+    with Image.open(_rebuild(broken)) as im:
+        assert isinstance(im, PngImagePlugin.PngImageFile)
+        assert im.size == (4, 4)
+        assert im.n_frames == 2
+        im.load()
+        assert im.getpixel((0, 0)) == (255, 0, 0, 255)
+        im.seek(1)
+        im.load()
+        assert im.getpixel((0, 0)) == (0, 255, 0, 255)
+
+
+def test_apng_valid_regression_in_memory() -> None:
+    # A normally constructed APNG keeps its size, frame count and pixels
+    data, _ = _make_apng_bytes()
+    with Image.open(data) as im:
+        assert isinstance(im, PngImagePlugin.PngImageFile)
+        assert im.size == (4, 4)
+        assert im.mode == "RGBA"
+        assert im.n_frames == 2
+        assert im.getpixel((0, 0)) == (255, 0, 0, 255)
+        im.seek(1)
+        im.load()
+        assert im.getpixel((0, 0)) == (0, 255, 0, 255)
+        im.seek(0)
+        assert [frame.tell() for frame in ImageSequence.Iterator(im)] == [0, 1]
 
 
 def test_apng_save(tmp_path: Path) -> None:

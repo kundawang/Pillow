@@ -110,6 +110,18 @@ In Pillow 13.0.0, loading an APNG frame before seeking to the next could cause
 frames using ``Disposal.OP_PREVIOUS`` and ``Blend.OP_OVER`` to be drawn over the
 wrong image. This has been fixed.
 
+Rejecting multiple PNG image headers
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The PNG specification only allows one ``IHDR`` chunk, which must be the first
+chunk and defines the canvas size. A malformed file containing a second
+``IHDR`` could previously overwrite the image dimensions, color mode and APNG
+frame state, or smuggle in decompression-bomb-sized dimensions. Additional
+``IHDR`` chunks are now ignored and raise a :py:exc:`SyntaxError` instead of
+modifying the image; the first ``IHDR`` remains the single source of the canvas
+size. As before, such files can still be loaded with
+``ImageFile.LOAD_TRUNCATED_IMAGES`` enabled.
+
 Minimum C version
 ^^^^^^^^^^^^^^^^^
 

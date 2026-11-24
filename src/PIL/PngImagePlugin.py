@@ -417,6 +417,7 @@ class PngStream(ChunkStream):
         self.im_custom_mimetype: str | None = None
         self.im_n_frames: int | None = None
         self._seq_num: int | None = None
+        self._ihdr_seen = False
         self.rewind_state = _RewindState({}, [], None)
 
         self.text_memory = 0
@@ -479,6 +480,15 @@ class PngStream(ChunkStream):
                 return s
             msg = "Truncated IHDR chunk"
             raise ValueError(msg)
+        if self._ihdr_seen:
+            # The PNG specification only allows one IHDR chunk, and it must be
+            # the first chunk. Ignore any additional IHDR instead of letting it
+            # overwrite the canvas size and other frame state.
+            if ImageFile.LOAD_TRUNCATED_IMAGES:
+                return s
+            msg = "multiple IHDR chunks"
+            raise SyntaxError(msg)
+        self._ihdr_seen = True
         self.im_size = i32(s, 0), i32(s, 4)
         try:
             self.im_mode, self.im_rawmode = _MODES[(s[8], s[9])]

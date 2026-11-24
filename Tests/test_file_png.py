@@ -134,6 +134,36 @@ class TestFilePng:
 
             assert png.im_mode == ""
 
+    def test_duplicate_ihdr_rejected(self) -> None:
+        # Only the first IHDR is valid; a second one must not overwrite the
+        # canvas size, mode or other state
+        second_ihdr = chunk(b"IHDR", o32(16), o32(16), b"\x08\x06", b"\0\0\0")
+        with pytest.raises(SyntaxError, match="multiple IHDR chunks"):
+            PngImagePlugin.PngImageFile(BytesIO(HEAD + second_ihdr + TAIL))
+
+        # Image.open wraps plugin SyntaxErrors as UnidentifiedImageError
+        with pytest.raises(Image.UnidentifiedImageError):
+            with Image.open(BytesIO(HEAD + second_ihdr + TAIL)):
+                pass
+
+    def test_duplicate_ihdr_keeps_first_dimensions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # In truncated mode the extra IHDR is ignored, so the image keeps the
+        # dimensions and mode declared by the first IHDR
+        second_ihdr = chunk(b"IHDR", o32(16), o32(16), b"\x08\x06", b"\0\0\0")
+        monkeypatch.setattr(ImageFile, "LOAD_TRUNCATED_IMAGES", True)
+        im = load(HEAD + second_ihdr + TAIL)
+        assert im.size == (1, 1)
+        assert im.mode == "RGB"
+
+    def test_duplicate_ihdr_bomb_dimensions_rejected(self) -> None:
+        # A decompression-bomb-sized dimension hidden in a duplicate IHDR must
+        # be rejected as a malformed file rather than becoming the image size
+        bomb_ihdr = chunk(b"IHDR", o32(2**31 - 1), o32(1), b"\x08\x06", b"\0\0\0")
+        with pytest.raises(SyntaxError, match="multiple IHDR chunks"):
+            PngImagePlugin.PngImageFile(BytesIO(HEAD + bomb_ihdr + TAIL))
+
     def test_bad_text(self) -> None:
         # Make sure PIL can read malformed tEXt chunks (@PIL152)
 
