@@ -134,6 +134,19 @@ escape sequences.
 Other changes
 =============
 
+Statistics for 16-bit grayscale images
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:py:meth:`~PIL.Image.Image.getextrema`, :py:meth:`~PIL.Image.Image.histogram`
+and :py:meth:`~PIL.Image.Image.entropy` now handle all of the 16-bit
+grayscale modes, ``I;16``, ``I;16L``, ``I;16B`` and ``I;16N``, consistently.
+Previously, :py:meth:`~PIL.Image.Image.getextrema` raised an exception for the
+explicit little-endian, big-endian and native modes, and the histogram and
+entropy read the raw storage bytes, giving different and byte-order-dependent
+results. Extrema now report the true ``0`` to ``65535`` pixel values, while
+histograms and entropy keep the existing 256-bin semantics based on the image
+extrema.
+
 Python 3.15
 ^^^^^^^^^^^
 

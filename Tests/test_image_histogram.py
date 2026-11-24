@@ -16,8 +16,8 @@ def test_histogram() -> None:
     assert histogram("L") == (256, 0, 662)
     assert histogram("LA") == (512, 0, 16384)
     assert histogram("La") == (512, 0, 16384)
-    assert histogram("I") == (256, 0, 662)
-    assert histogram("F") == (256, 0, 662)
+    for mode in ("I", "I;16", "I;16L", "I;16B", "I;16N", "F"):
+        assert histogram(mode) == (256, 0, 662)
     assert histogram("P") == (256, 0, 1551)
     assert histogram("PA") == (512, 0, 16384)
     assert histogram("RGB") == (768, 4, 675)
@@ -49,11 +49,61 @@ def test_histogram_masked() -> None:
     assert histogram("YCbCr") == (768, 0, 1009)
 
 
-@pytest.mark.parametrize("mode", ("I", "F"))
+@pytest.mark.parametrize("mode", ("I", "I;16", "I;16L", "I;16B", "I;16N", "F"))
 def test_histogram_masked_unsupported_mode(mode: str) -> None:
     mask = Image.new("1", (128, 128))
     with pytest.raises(ValueError, match="image has wrong mode"):
         hopper(mode).histogram(mask)
+
+
+@pytest.mark.parametrize("mode", ("I;16", "I;16L", "I;16B", "I;16N"))
+def test_histogram_i16(mode: str) -> None:
+    im = Image.new(mode, (2, 1))
+    im.putpixel((1, 0), 300)
+    h = im.histogram()
+    assert h[0] == h[255] == 1
+    assert sum(h) == 2
+
+    h = im.histogram(extrema=(0, 510))
+    assert h[0] == h[150] == 1
+    assert sum(h) == 2
+
+
+@pytest.mark.parametrize("mode", ("I;16", "I;16L", "I;16B", "I;16N"))
+def test_histogram_i16_fixed_values(mode: str) -> None:
+    # Fixed pixels covering the full 16-bit range and an 8-bit boundary
+    values = (0, 255, 256, 65535)
+    base = Image.new("I", (len(values), 1))
+    base.putdata(values)
+    im = base.convert(mode)
+
+    assert list(im.getdata()) == list(values)
+    assert im.getextrema() == (0, 65535)
+
+    h = im.histogram()
+    assert len(h) == 256
+    # 0, 256 and 65535 land in the first/last edge bins when scaling the
+    # full 0..65535 range onto 256 bins; 255 maps to the last bin
+    assert h[0] == 3
+    assert h[255] == 1
+    assert sum(h) == len(values)
+    assert all(count == 0 for index, count in enumerate(h) if index not in (0, 255))
+
+
+@pytest.mark.parametrize("mode", ("I", "I;16", "I;16L", "I;16B", "I;16N", "F"))
+def test_histogram_single_value(mode: str) -> None:
+    im = Image.new(mode, (2, 2), 3)
+    assert im.histogram() == [4] + [0] * 255
+    assert im.histogram(extrema=(3, 3)) == [4] + [0] * 255
+    assert im.histogram(extrema=(2, 2)) == [0] * 256
+    assert im.histogram(extrema=(4, 2)) == [0] * 256
+
+
+def test_histogram_zero_size() -> None:
+    assert Image.new("L", (0, 0)).histogram() == [0] * 256
+    for mode in ("I", "I;16", "I;16L", "I;16B", "I;16N", "F"):
+        with pytest.raises(ValueError, match="min/max not given"):
+            Image.new(mode, (0, 0)).histogram()
 
 
 def test_histogram_mask_size_mismatch() -> None:

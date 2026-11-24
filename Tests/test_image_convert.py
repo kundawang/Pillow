@@ -87,6 +87,34 @@ def test_16bit() -> None:
         assert im_i16.getpixel((0, 0)) == 65535
 
 
+def test_16bit_endian_conversion() -> None:
+    values = (0, 255, 256, 65535)
+    base = Image.new("I", (len(values), 1))
+    base.putdata(values)
+
+    modes = ("I;16", "I;16L", "I;16B", "I;16N")
+    images = {}
+    for mode in modes:
+        im = base.convert(mode)
+        assert im.mode == mode
+        assert list(im.getdata()) == list(values)
+        images[mode] = im
+
+    # Converting between any two byte orders must preserve pixel values
+    for source in modes:
+        for target in modes:
+            converted = images[source].convert(target)
+            assert converted.mode == target
+            assert list(converted.getdata()) == list(values)
+
+    # The raw storage differs by byte order, even though pixels are identical
+    little = images["I;16L"].tobytes("raw", "I;16L")
+    big = images["I;16B"].tobytes("raw", "I;16B")
+    assert little != big
+    assert big == b"".join(value.to_bytes(2, "big") for value in values)
+    assert little == b"".join(value.to_bytes(2, "little") for value in values)
+
+
 def test_16bit_workaround() -> None:
     with Image.open("Tests/images/16bit.cropped.tif") as im:
         _test_float_conversion(im.convert("I"))
