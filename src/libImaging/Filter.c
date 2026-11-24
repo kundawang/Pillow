@@ -115,10 +115,42 @@ ImagingExpand(Imaging imIn, int margin) {
         }                                                                        \
     }
 
+#define EXPAND_LINE_I16(yin, yout)                                               \
+    do {                                                                         \
+        UINT8 *in_line = (UINT8 *)imIn->image[yin];                              \
+        UINT8 *out_line = (UINT8 *)imOut->image[yout];                           \
+        for (x = 0; x < margin; x++) {                                           \
+            out_line[x * 2] = in_line[0];                                        \
+            out_line[x * 2 + 1] = in_line[1];                                    \
+        }                                                                        \
+        memcpy(out_line + (size_t)margin * 2, in_line, (size_t)imIn->xsize * 2); \
+        for (x = 0; x < margin; x++) {                                           \
+            size_t source_offset = ((size_t)imIn->xsize - 1) * 2;                \
+            size_t target_offset = (size_t)(margin + imIn->xsize + x) * 2;       \
+            out_line[target_offset] = in_line[source_offset];                    \
+            out_line[target_offset + 1] = in_line[source_offset + 1];            \
+        }                                                                        \
+    } while (0)
+
+#define EXPAND_I16()                                                    \
+    do {                                                                \
+        for (y = 0; y < margin; y++) {                                  \
+            EXPAND_LINE_I16(0, y);                                      \
+        }                                                               \
+        for (y = 0; y < imIn->ysize; y++) {                             \
+            EXPAND_LINE_I16(y, y + margin);                             \
+        }                                                               \
+        for (y = 0; y < margin; y++) {                                  \
+            EXPAND_LINE_I16(imIn->ysize - 1, margin + imIn->ysize + y); \
+        }                                                               \
+    } while (0)
+
     ImagingSectionEnter(&cookie);
     MUTEX_LOCK(&imIn->mutex);
 
-    if (imIn->image8) {
+    if (imIn->type == IMAGING_TYPE_I16) {
+        EXPAND_I16();
+    } else if (imIn->image8) {
         EXPAND(UINT8, image8);
     } else {
         EXPAND(INT32, image32);

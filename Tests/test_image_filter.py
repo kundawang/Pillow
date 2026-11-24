@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import struct
 
 import pytest
 
@@ -139,6 +140,141 @@ def test_rankfilter(
     med = im.filter(ImageFilter.MedianFilter).getpixel((1, 1))
     maximum = im.filter(ImageFilter.MaxFilter).getpixel((1, 1))
     assert (minimum, med, maximum) == expected
+
+
+I16_RANK_MODES = ("I;16", "I;16L", "I;16B", "I;16N")
+
+# Include values whose two bytes sort in the opposite order to their numeric
+# order, such as 0x00FF (255) and 0x0100 (256).
+I16_RANK_MATRIX = [
+    [0x0000, 0x00FF, 0x0100, 0x1234, 0xFFFF],
+    [0x8000, 0x7FFF, 0x0001, 0x2345, 0xABCD],
+    [0x1000, 0x0100, 0x0010, 0xF0F0, 0x0F0F],
+    [0xABCD, 0xDCBA, 0xCAFE, 0xBABE, 0x1357],
+    [0x2468, 0x8642, 0x9999, 0xAAAA, 0x5555],
+]
+
+RANK_MATRIX = [
+    [17, 4, 22, 9, 13],
+    [8, 24, 1, 15, 6],
+    [20, 11, 7, 25, 3],
+    [2, 18, 14, 0, 23],
+    [12, 5, 19, 10, 16],
+]
+
+
+def rank_reference(matrix: list[list[int]], size: int, rank: int) -> list[list[int]]:
+    """Return rank-filtered values using repeated-edge boundary extension."""
+    margin = size // 2
+    height = len(matrix)
+    width = len(matrix[0])
+    result = []
+    for y in range(height):
+        row = []
+        for x in range(width):
+            window = []
+            for window_y in range(y - margin, y + margin + 1):
+                source_y = min(max(window_y, 0), height - 1)
+                for window_x in range(x - margin, x + margin + 1):
+                    source_x = min(max(window_x, 0), width - 1)
+                    window.append(matrix[source_y][source_x])
+            row.append(sorted(window)[rank])
+        result.append(row)
+    return result
+
+
+@pytest.mark.parametrize("mode", I16_RANK_MODES)
+@pytest.mark.parametrize("size", (1, 3, 5))
+def test_rankfilter_i16_reference(mode: str, size: int) -> None:
+    endian = {
+        "I;16": "<",
+        "I;16L": "<",
+        "I;16B": ">",
+        "I;16N": "=",
+    }[mode]
+    width = len(I16_RANK_MATRIX[0])
+    height = len(I16_RANK_MATRIX)
+    values = [value for row in I16_RANK_MATRIX for value in row]
+    data = struct.pack(f"{endian}{len(values)}H", *values)
+    im = Image.frombytes(mode, (width, height), data)
+
+    filters_and_ranks = (
+        (ImageFilter.MinFilter(size), 0),
+        (ImageFilter.MedianFilter(size), size * size // 2),
+        (ImageFilter.MaxFilter(size), size * size - 1),
+    )
+    for rank_filter, rank in filters_and_ranks:
+        result = im.filter(rank_filter)
+        expected = rank_reference(I16_RANK_MATRIX, size, rank)
+
+        assert result.mode == mode
+        assert result.size == im.size
+        for y, row in enumerate(expected):
+            for x, value in enumerate(row):
+                assert result.getpixel((x, y)) == value, (
+                    mode,
+                    rank_filter.name,
+                    size,
+                    (x, y),
+                )
+
+
+@pytest.mark.parametrize("mode", ("L", "I", "F"))
+@pytest.mark.parametrize("size", (1, 3, 5))
+def test_rankfilter_integer_and_float_reference(mode: str, size: int) -> None:
+    width = len(RANK_MATRIX[0])
+    height = len(RANK_MATRIX)
+    im = Image.new(mode, (width, height))
+    im.putdata([value for row in RANK_MATRIX for value in row])
+
+    filters_and_ranks = (
+        (ImageFilter.MinFilter(size), 0),
+        (ImageFilter.MedianFilter(size), size * size // 2),
+        (ImageFilter.MaxFilter(size), size * size - 1),
+    )
+    for rank_filter, rank in filters_and_ranks:
+        result = im.filter(rank_filter)
+        expected = rank_reference(RANK_MATRIX, size, rank)
+
+        assert result.mode == mode
+        for y, row in enumerate(expected):
+            for x, value in enumerate(row):
+                assert result.getpixel((x, y)) == value
+
+
+@pytest.mark.parametrize("mode", ("L", *I16_RANK_MODES))
+@pytest.mark.parametrize(
+    "attribute, value, message",
+    (
+        ("size", 2, "bad filter size"),
+        ("rank", 9, "bad rank value"),
+    ),
+)
+def test_rankfilter_invalid_arguments_match_8bit_path(
+    mode: str, attribute: str, value: int, message: str
+) -> None:
+    im = Image.new(mode, (4, 4), 1000)
+    rank_filter = ImageFilter.RankFilter(3, 0)
+    setattr(rank_filter, attribute, value)
+
+    with pytest.raises(ValueError, match=message):
+        im.filter(rank_filter)
+
+
+@pytest.mark.parametrize("mode", I16_RANK_MODES)
+@pytest.mark.parametrize("size", ((0, 1), (1, 0), (0, 0)))
+def test_rankfilter_i16_zero_dimension(mode: str, size: tuple[int, int]) -> None:
+    im = Image.new(mode, size)
+    filters = (
+        ImageFilter.MinFilter(1),
+        ImageFilter.MedianFilter(1),
+        ImageFilter.MaxFilter(1),
+        ImageFilter.RankFilter(3, 1),
+    )
+    for rank_filter in filters:
+        result = im.filter(rank_filter)
+        assert result.mode == mode
+        assert result.size == size
 
 
 @pytest.mark.parametrize(

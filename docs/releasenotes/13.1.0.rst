@@ -95,6 +95,15 @@ Blurring I;16 images
 :py:class:`~PIL.ImageFilter.GaussianBlur` and :py:class:`~PIL.ImageFilter.BoxBlur`
 now support I;16, I;16L, I;16B and I;16N images.
 
+Rank filters for I;16 images
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:py:class:`~PIL.ImageFilter.MinFilter`, :py:class:`~PIL.ImageFilter.MedianFilter`,
+:py:class:`~PIL.ImageFilter.MaxFilter` and :py:class:`~PIL.ImageFilter.RankFilter`
+now support I;16, I;16L, I;16B and I;16N images. Pixel values are compared
+numerically regardless of byte order, and the output retains the input mode and
+precision.
+
 Respect Python build-tree configuration
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

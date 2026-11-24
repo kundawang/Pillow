@@ -57,15 +57,17 @@
         return a[k];                                 \
     }
 
-MakeRankFunction(UINT8) MakeRankFunction(INT32) MakeRankFunction(FLOAT32)
+MakeRankFunction(UINT8) MakeRankFunction(INT32) MakeRankFunction(
+    FLOAT32
+) MakeRankFunction(UINT16)
 
     Imaging ImagingRankFilter(Imaging im, int size, int rank) {
     Imaging imOut = NULL;
     ImagingSectionCookie cookie;
     int x, y;
-    int i, margin, size2;
+    int i, j, n, margin, size2;
 
-    if (!im || im->bands != 1 || im->type == IMAGING_TYPE_I16) {
+    if (!im || im->bands != 1) {
         return (Imaging)ImagingError_ModeError();
     }
 
@@ -115,7 +117,45 @@ MakeRankFunction(UINT8) MakeRankFunction(INT32) MakeRankFunction(FLOAT32)
         free(buf);                                                                \
     } while (0)
 
-    if (im->image8) {
+#define RANK_BODY_I16()                                                              \
+    do {                                                                             \
+        UINT16 *buf = malloc(size2 * sizeof(UINT16));                                \
+        if (!buf) {                                                                  \
+            goto nomemory;                                                           \
+        }                                                                            \
+        int bigendian = isImageI16BigEndian(im);                                     \
+        ImagingSectionEnter(&cookie);                                                \
+        for (y = 0; y < imOut->ysize; y++) {                                         \
+            UINT8 *out = (UINT8 *)imOut->image[y];                                   \
+            for (x = 0; x < imOut->xsize; x++) {                                     \
+                n = 0;                                                               \
+                for (i = 0; i < size; i++) {                                         \
+                    const UINT8 *in = (const UINT8 *)im->image[y + i];               \
+                    for (j = 0; j < size; j++) {                                     \
+                        int offset = (x + j) * 2;                                    \
+                        buf[n++] = bigendian                                         \
+                                       ? ((UINT16)in[offset] << 8) | in[offset + 1]  \
+                                       : in[offset] | ((UINT16)in[offset + 1] << 8); \
+                    }                                                                \
+                }                                                                    \
+                UINT16 value = RankUINT16(buf, size2, rank);                         \
+                int offset = x * 2;                                                  \
+                if (bigendian) {                                                     \
+                    out[offset] = (UINT8)(value >> 8);                               \
+                    out[offset + 1] = (UINT8)value;                                  \
+                } else {                                                             \
+                    out[offset] = (UINT8)value;                                      \
+                    out[offset + 1] = (UINT8)(value >> 8);                           \
+                }                                                                    \
+            }                                                                        \
+        }                                                                            \
+        ImagingSectionLeave(&cookie);                                                \
+        free(buf);                                                                   \
+    } while (0)
+
+    if (im->type == IMAGING_TYPE_I16) {
+        RANK_BODY_I16();
+    } else if (im->image8) {
         RANK_BODY(UINT8);
     } else if (im->type == IMAGING_TYPE_INT32) {
         RANK_BODY(INT32);
