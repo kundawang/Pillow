@@ -67,3 +67,11 @@ Minimum C version
 
 C11 is now the minimum version of C required to compile Pillow from source.
 Pillow requires Python 3.11 or later, and CPython 3.11 and later require C11.
+
+Faster decoding of uncompressed DDS images
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Uncompressed DDS images were read one pixel at a time. The pixel data is now
+read in a single block, and channels whose masks cover a full byte are copied
+directly, making large images considerably faster to load. Truncated pixel data
+now raises an :py:class:`OSError` instead of returning a partial image.

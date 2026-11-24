@@ -20,7 +20,6 @@ from enum import IntEnum, IntFlag
 
 from . import Image, ImageFile, ImagePalette
 from ._binary import i32le as i32
-from ._binary import o8
 from ._binary import o32le as o32
 
 TYPE_CHECKING = False
@@ -493,11 +492,10 @@ class DdsRgbDecoder(ImageFile.PyDecoder):
     def decode(self, buffer: Image.DecoderInput) -> tuple[int, int]:
         bitcount, masks = self.args
 
-        data = bytearray()
         bytecount = bitcount // 8
         if not bytecount:
-            self.set_as_raw(data)
-            return -1, 0
+            msg = f"Unsupported bitcount {bitcount}"
+            raise OSError(msg)
 
         # Some masks will be padded with zeros, e.g. R 0b11 G 0b1100
         # Calculate how many zeros each mask is padded with
@@ -513,19 +511,61 @@ class DdsRgbDecoder(ImageFile.PyDecoder):
             mask_totals.append(mask >> offset)
 
         assert self.fd is not None
-        dest_length = self.state.xsize * self.state.ysize * len(masks)
-        while len(data) < dest_length:
-            bytes_read = self.fd.read(bytecount)
-            if len(bytes_read) < bytecount:
+        pixel_count = self.state.xsize * self.state.ysize
+        dest_length = pixel_count * len(masks)
+
+        # Read the whole pixel block in one go instead of one read per pixel.
+        # _safe_read raises if the file is truncated, so a partial image is
+        # never returned.
+        bytes_needed = pixel_count * bytecount
+        raw = ImageFile._safe_read(self.fd, bytes_needed)
+
+        data = bytearray(dest_length)
+        # Fast path: a channel whose mask covers exactly 8 bits that are byte
+        # aligned needs no scaling, so its byte can be copied straight across
+        # instead of decoding every pixel separately
+        byte_offsets = []
+        for i, mask in enumerate(masks):
+            if mask_totals[i] != 255 or mask_offsets[i] % 8:
                 break
-            value = int.from_bytes(bytes_read, "little")
-            for i, mask in enumerate(masks):
-                masked_value = value & mask
-                # Remove the zero padding, and scale it to 8 bits
-                data += o8(
-                    int(((masked_value >> mask_offsets[i]) / mask_totals[i]) * 255)
-                    if mask_totals[i]
-                    else 0
+            byte_offsets.append(mask_offsets[i] // 8)
+        if len(byte_offsets) == len(masks):
+            for channel, offset in enumerate(byte_offsets):
+                data[channel :: len(masks)] = raw[offset::bytecount]
+            self.set_as_raw(data)
+            return -1, 0
+
+        # General path: decode each pixel value with the channel masks
+        if bytecount in (1, 2):
+            # Unpack the whole block at once: one little-endian value per pixel
+            values: list[int] = list(
+                struct.unpack(f"<{pixel_count}{'B' if bytecount == 1 else 'H'}", raw)
+            )
+        else:
+            values = [
+                int.from_bytes(raw[start : start + bytecount], "little")
+                for start in range(0, bytes_needed, bytecount)
+            ]
+        for i, mask in enumerate(masks):
+            if not mask_totals[i]:
+                continue
+            total = mask_totals[i]
+            offset = mask_offsets[i]
+            if total <= 255:
+                # Each channel has at most 8 significant bits, so a small byte
+                # lookup table replaces the per pixel scaling
+                lookup = bytes(int((value / total) * 255) for value in range(total + 1))
+                data[i :: len(masks)] = bytes(
+                    map(
+                        lookup.__getitem__,
+                        ((value & mask) >> offset for value in values),
+                    )
+                )
+            else:
+                # A wider mask comes from a malformed header, so scale directly
+                # rather than allocate a lookup table of unbounded size
+                data[i :: len(masks)] = bytes(
+                    int((((value & mask) >> offset) / total) * 255) for value in values
                 )
         self.set_as_raw(data)
         return -1, 0
