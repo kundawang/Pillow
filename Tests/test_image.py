@@ -1276,6 +1276,116 @@ class TestImageBytes:
         reloaded.putdata(im.get_flattened_data())
         assert_image_equal(im, reloaded)
 
+    def test_encode_to_bytes(self) -> None:
+        # The C encoder's single-buffer fast path must return the same
+        # bytes as the public tobytes API.
+        im = hopper("RGB")
+        encoder = Image._getencoder("RGB", "raw", ("RGB",))
+        encoder.setimage(im.im)
+        try:
+            errcode, data = encoder.encode_to_bytes(
+                max(ImageFile.MAXBLOCK, im.size[0] * 4)
+            )
+        finally:
+            encoder.cleanup()
+        assert errcode == 1
+        assert isinstance(data, bytes)
+        assert data == im.tobytes()
+
+    @pytest.mark.parametrize("mode", Image.MODES)
+    def test_tobytes_returns_bytes(self, mode: str) -> None:
+        # The fast path returns a real bytes object, not a bytearray.
+        assert type(hopper(mode).tobytes()) is bytes
+
+    def test_tobytes_raw_arguments(self) -> None:
+        im = hopper("RGB")
+        # alternate rawmode
+        bgr = im.tobytes("raw", "BGR")
+        reloaded_bgr = Image.frombytes("RGB", im.size, bgr, "raw", "BGR")
+        assert bgr == reloaded_bgr.tobytes("raw", "BGR")
+        # explicit stride and flipped orientation exercise the multi-pass
+        # growth logic of the single-buffer path
+        stride = im.size[0] * 3 + 16
+        flipped = im.tobytes("raw", ("RGB", stride, -1))
+        assert len(flipped) == stride * im.size[1]
+        reloaded = Image.frombytes(
+            "RGB", im.size, flipped, "raw", ("RGB", stride, -1)
+        )
+        assert_image_equal(reloaded, im)
+
+    def test_tobytes_encode_failure(self) -> None:
+        im = hopper("RGB")
+        # A stride smaller than one packed row is a CONFIG error.
+        with pytest.raises(RuntimeError, match="encoder error -8 in tobytes"):
+            im.tobytes("raw", ("RGB", 1, 1))
+
+    def test_encode_to_bytes_failure(self) -> None:
+        im = hopper("RGB")
+        encoder = Image._getencoder("RGB", "raw", ("RGB", 1, 1))
+        encoder.setimage(im.im)
+        try:
+            errcode, data = encoder.encode_to_bytes(ImageFile.MAXBLOCK)
+        finally:
+            encoder.cleanup()
+        assert errcode == -8
+        assert data == b""
+
+    def test_encode_to_bytes_invalid_bufsize(self) -> None:
+        im = hopper("RGB")
+        encoder = Image._getencoder("RGB", "raw", ("RGB",))
+        encoder.setimage(im.im)
+        try:
+            with pytest.raises(ValueError):
+                encoder.encode_to_bytes(0)
+            with pytest.raises(ValueError):
+                encoder.encode_to_bytes(-1)
+        finally:
+            encoder.cleanup()
+
+
+class ChunkedMockEncoder(ImageFile.PyEncoder):
+    """Python encoder emitting several chunks, to cover the fallback path."""
+
+    cleaned = False
+
+    def init(self, args: tuple[object, ...]) -> None:
+        self._chunks = [b"abcdef", b"ghijkl", b"mnopqr"]
+
+    def encode(self, bufsize: int) -> tuple[int, int, bytes]:
+        if self._chunks:
+            data = self._chunks.pop(0)
+            errcode = 0 if self._chunks else 1
+            return len(data), errcode, data
+        return 0, 1, b""
+
+    def cleanup(self) -> None:
+        type(self).cleaned = True
+
+
+class FailingMockEncoder(ImageFile.PyEncoder):
+    def init(self, args: tuple[object, ...]) -> None:
+        pass
+
+    def encode(self, bufsize: int) -> tuple[int, int, bytes]:
+        return 0, -5, b""
+
+
+class TestToBytesPyEncoder:
+    def test_python_encoder_fallback(self) -> None:
+        Image.register_encoder("MOCK_CHUNKED", ChunkedMockEncoder)
+        ChunkedMockEncoder.cleaned = False
+        im = hopper("RGB")
+        data = im.tobytes("MOCK_CHUNKED")
+        assert data == b"abcdefghijklmnopqr"
+        assert type(data) is bytes
+        assert ChunkedMockEncoder.cleaned
+
+    def test_python_encoder_failure(self) -> None:
+        Image.register_encoder("MOCK_FAILING", FailingMockEncoder)
+        im = hopper("RGB")
+        with pytest.raises(RuntimeError, match="encoder error -5 in tobytes"):
+            im.tobytes("MOCK_FAILING")
+
 
 class MockEncoder(ImageFile.PyEncoder):
     pass

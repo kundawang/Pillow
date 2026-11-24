@@ -882,19 +882,28 @@ class Image:
 
             bufsize = max(ImageFile.MAXBLOCK, self.size[0] * 4)  # see RawEncode.c
 
-            output = []
-            while True:
-                bytes_consumed, errcode, data = e.encode(bufsize)
-                output.append(data)
-                if errcode:
-                    break
+            if hasattr(e, "encode_to_bytes"):
+                # C encoder: collect the output in one growing buffer
+                # instead of accumulating chunks and joining them, which
+                # temporarily held close to twice the output size.
+                errcode, data = e.encode_to_bytes(bufsize)
+            else:
+                # Python encoder (e.g. BLP, qoi): keep the chunked path,
+                # which is part of the PyEncoder contract.
+                output = []
+                while True:
+                    bytes_consumed, errcode, data = e.encode(bufsize)
+                    output.append(data)
+                    if errcode:
+                        break
+                data = b"".join(output)
             if errcode < 0:
                 msg = f"encoder error {errcode} in tobytes"
                 raise RuntimeError(msg)
         finally:
             e.cleanup()
 
-        return b"".join(output)
+        return data
 
     def tobitmap(self, name: str = "image") -> bytes:
         """

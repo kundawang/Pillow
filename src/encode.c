@@ -162,6 +162,79 @@ _encode(ImagingEncoderObject *encoder, PyObject *args) {
     return result;
 }
 
+/**
+ * Encode the whole image into a single Python bytes object, growing the
+ * destination buffer as needed instead of returning separate chunks that
+ * the caller has to concatenate.
+ *
+ * Python arguments:
+ * - bufsize (int, optional): The size of the first buffer to allocate. The
+ *   buffer is grown if the encoder produces more data.
+ *
+ * @return A tuple containing the error code and the encoded bytes object.
+ *         NULL if an error occurred, with a Python exception set.
+ */
+static PyObject *
+_encode_to_bytes(ImagingEncoderObject *encoder, PyObject *args) {
+    Py_ssize_t bufsize = 16384;
+
+    if (!PyArg_ParseTuple(args, "|n", &bufsize)) {
+        return NULL;
+    }
+    if (bufsize <= 0) {
+        PyErr_SetString(PyExc_ValueError, "bufsize must be greater than zero");
+        return NULL;
+    }
+
+    PyBytesWriter *writer = PyBytesWriter_Create(bufsize);
+    if (writer == NULL) {
+        return NULL;
+    }
+
+    int errcode = 0;
+    Py_ssize_t total = 0;
+    while (errcode == 0) {
+        Py_ssize_t allocated = _PyBytesWriter_GetAllocated(writer);
+        Py_ssize_t room = allocated - total;
+        if (room > INT_MAX) {
+            room = INT_MAX;
+        }
+        int bytes = encoder->encode(
+            encoder->im,
+            &encoder->state,
+            (UINT8 *)PyBytesWriter_GetData(writer) + total,
+            (int)room
+        );
+        errcode = encoder->state.errcode;
+
+        if (bytes < 0 || errcode < 0) {
+            /* Encoding failed: discard partial output, mirroring the
+               historic chunked path which raised before returning. */
+            PyBytesWriter_Discard(writer);
+            return Py_BuildValue("iS", errcode, PyBytes_FromStringAndSize(NULL, 0));
+        }
+        total += bytes;
+
+        if (errcode == 0) {
+            /* Need another pass: make sure there is room for more data. */
+            if (total > PY_SSIZE_T_MAX - bufsize ||
+                PyBytesWriter_Resize(writer, total + bufsize) < 0) {
+                PyBytesWriter_Discard(writer);
+                return NULL;
+            }
+        }
+    }
+
+    PyObject *buf = PyBytesWriter_FinishWithSize(writer, total);
+    if (buf == NULL) {
+        return NULL;
+    }
+
+    PyObject *result = Py_BuildValue("iS", errcode, buf);
+    Py_DECREF(buf);
+    return result;
+}
+
 static PyObject *
 _encode_to_pyfd(ImagingEncoderObject *encoder, PyObject *args) {
     PyObject *result;
@@ -348,6 +421,7 @@ _get_pushes_fd(ImagingEncoderObject *encoder, void *closure) {
 
 static struct PyMethodDef methods[] = {
     {"encode", (PyCFunction)_encode, METH_VARARGS},
+    {"encode_to_bytes", (PyCFunction)_encode_to_bytes, METH_VARARGS},
     {"cleanup", (PyCFunction)_encode_cleanup, METH_VARARGS},
     {"encode_to_file", (PyCFunction)_encode_to_file, METH_VARARGS},
     {"encode_to_pyfd", (PyCFunction)_encode_to_pyfd, METH_NOARGS},

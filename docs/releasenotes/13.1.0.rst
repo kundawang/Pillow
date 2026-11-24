@@ -131,3 +131,13 @@ not bundled into the wheels, so the system zlib was used at runtime instead, and
 Pillow 13.0.0 also failed to import on systems where ``libz.so.1`` was not on the
 default library search path, such as NixOS. Linux wheels no longer require a
 system zlib, and gain the speed of zlib-ng as macOS and Windows wheels already did.
+
+Reduced memory use in Image.tobytes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:py:meth:`~PIL.Image.Image.tobytes` now collects the encoded output in a single
+growing buffer when using a C encoder, instead of accumulating separate chunks
+and concatenating them. For a large image this lowers the peak Python heap
+allocation from almost twice the output size to roughly the output size plus one
+encoder block, and is also faster. The returned bytes are unchanged, and Python
+encoders such as BLP and QOI keep the previous chunked behavior.
