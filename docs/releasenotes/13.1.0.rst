@@ -121,3 +121,12 @@ WebP encoding errors now include a description
 
 When libwebp fails to encode an image, the raised :py:exc:`ValueError` now
 consistently describes the error rather than only reporting a numeric code.
+
+Seeking read-only images
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+If an image frame was memory mapped, its core image is read-only. Seeking to
+another frame of the same image now discards that core image, so that the new
+frame is decoded into writable memory instead of failing with
+:py:exc:`ValueError`. Seeking to the current frame keeps the loaded pixels, as
+does seeking an image with a writable core image.

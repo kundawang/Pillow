@@ -20,6 +20,7 @@ from PIL import (
     UnidentifiedImageError,
     features,
 )
+from PIL._util import DeferredError
 
 from .helper import (
     assert_image_equal,
@@ -48,6 +49,93 @@ try:
     from IPython.lib.pretty import PrettyPrinter
 except ImportError:
     PrettyPrinter = None
+
+
+def _assert_core_is(im: Image.Image, core: object) -> None:
+    # Check identity via a function, so that mypy does not narrow im._im and
+    # then report later assignments to it as unreachable
+    assert im._im is core
+
+
+class _MockSeekableImageFile(ImageFile.ImageFile):
+    """Two 2x1 frames, where only the first one can be memory mapped.
+
+    The first frame is a single tile, so it is memory mapped when the file
+    was opened from a path, making the core image read-only. The second frame
+    is split into two tiles, so it cannot be memory mapped and would need a
+    writable core image.
+    """
+
+    format = "MOCK"
+    _close_exclusive_fp_after_loading = False
+
+    def _open(self) -> None:
+        self._mode = "L"
+        self._size = (2, 1)
+        self.n_frames = 2
+        self._frame = 0
+
+        assert self.fp is not None
+        self._fp = self.fp
+
+        # A tile that can be memory mapped
+        self.tile = [ImageFile._Tile("raw", None, 0, self.mode)]
+
+    def seek(self, frame: int) -> None:
+        if not self._seek_check(frame):
+            return
+        self._frame = frame
+        if isinstance(self._fp, DeferredError):
+            raise self._fp.ex
+        self.fp = self._fp
+
+        if frame == 0:
+            # A tile that can be memory mapped
+            self.tile = [ImageFile._Tile("raw", None, 0, self.mode)]
+        else:
+            # Multiple tiles, so memory mapping is not used
+            self.tile = [
+                ImageFile._Tile("raw", (0, 0, 1, 1), 2, self.mode),
+                ImageFile._Tile("raw", (1, 0, 2, 1), 3, self.mode),
+            ]
+        Image.Image.seek(self, frame)
+
+    def tell(self) -> int:
+        return self._frame
+
+
+class _MockLazyImageFile(ImageFile.ImageFile):
+    """Frames are decoded in ``load()``, not when seeking."""
+
+    format = "MOCK"
+    _close_exclusive_fp_after_loading = False
+
+    def _open(self) -> None:
+        self._mode = "L"
+        self._size = (2, 1)
+        self.n_frames = 2
+        self._frame = 0
+        self._loaded = -1
+
+        assert self.fp is not None
+        self._data = self.fp.read()
+
+    def seek(self, frame: int) -> None:
+        if not self._seek_check(frame):
+            return
+        self._frame = frame
+
+        # No tile is queued, so loaded pixels remain valid
+        Image.Image.seek(self, frame)
+
+    def tell(self) -> int:
+        return self._frame
+
+    def load(self) -> Image.core.PixelAccess | None:
+        if self._loaded != self._frame:
+            self._loaded = self._frame
+            self.frombytes(self._data[self._frame * 2 : self._frame * 2 + 2], "raw")
+        return super().load()
 
 
 class TestImage:
@@ -251,6 +339,100 @@ class TestImage:
 
             im.save(temp_file)
             assert im.readonly
+
+    def test_seek_with_readonly(self, tmp_path: Path) -> None:
+        path = tmp_path / "mock.bin"
+        path.write_bytes(b"\x00\x01\x02\x03")
+
+        im = _MockSeekableImageFile(path)
+        im.load()
+        assert im.readonly
+        core = im._im
+        assert core is not None
+        assert list(im.get_flattened_data()) == [0, 1]
+
+        # Seeking to the current frame should not clear the loaded pixels
+        im.seek(0)
+        assert im.tell() == 0
+        _assert_core_is(im, core)
+        assert list(im.get_flattened_data()) == [0, 1]
+
+        # Seeking to another frame queues a new tile, so the read-only core
+        # image cannot be reused
+        im.seek(1)
+        assert im.tell() == 1
+        assert im._im is None
+
+        # Reloading gives the contents of the new frame
+        im.load()
+        assert im._im is not core
+        assert not im.readonly
+        assert list(im.get_flattened_data()) == [2, 3]
+
+        # And seeking back again gives the first frame. The core image is now
+        # writable, so it can be reused.
+        core = im._im
+        im.seek(0)
+        _assert_core_is(im, core)
+        im.load()
+        assert list(im.get_flattened_data()) == [0, 1]
+
+    def test_seek_current_frame_with_readonly(self) -> None:
+        # A memory-mapped image is read-only even for a single frame
+        with Image.open("Tests/images/hopper_8bit.pgm") as im:
+            im.load()
+            assert im.readonly
+            core = im._im
+            assert core is not None
+
+            # A no-op seek should not clear the core image
+            im.seek(im.tell())
+
+            _assert_core_is(im, core)
+
+    def test_seek_with_writable(self) -> None:
+        # A stream is not memory mapped, even for a single tile
+        im = _MockSeekableImageFile(io.BytesIO(b"\x00\x01\x02\x03"))
+        im.load()
+        assert not im.readonly
+        core = im._im
+        assert core is not None
+
+        # A writable core image can be reused for the next frame
+        im.seek(1)
+        _assert_core_is(im, core)
+        im.load()
+        assert list(im.get_flattened_data()) == [2, 3]
+
+    def test_seek_failed(self, tmp_path: Path) -> None:
+        path = tmp_path / "mock.bin"
+        path.write_bytes(b"\x00\x01\x02\x03")
+
+        im = _MockSeekableImageFile(path)
+        im.load()
+        core = im._im
+
+        for frame in (-1, 2):
+            with pytest.raises(EOFError):
+                im.seek(frame)
+
+        # A failed seek must not leave the image half-updated
+        assert im.tell() == 0
+        _assert_core_is(im, core)
+        assert list(im.get_flattened_data()) == [0, 1]
+
+    def test_seek_with_lazy_load(self) -> None:
+        im = _MockLazyImageFile(io.BytesIO(b"\x00\x01\x02\x03"))
+        im.load()
+        assert list(im.get_flattened_data()) == [0, 1]
+
+        # No tile is queued, so the loaded pixels are not invalidated
+        im.seek(1)
+        assert im.tell() == 1
+        assert im._im is not None
+
+        im.load()
+        assert list(im.get_flattened_data()) == [2, 3]
 
     def test_dump(self, tmp_path: Path) -> None:
         im = Image.new("L", (10, 10))

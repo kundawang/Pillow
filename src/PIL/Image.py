@@ -2794,7 +2794,12 @@ class Image:
             raise EOFError(msg)
 
         if self._im is not None and (
-            self.im.size != self.size or self.im.mode != self.mode
+            self.im.size != self.size
+            or self.im.mode != self.mode
+            # A new tile has been queued for decoding. If the current core
+            # image is read-only, it cannot be written to, so it must not be
+            # reused for the new frame.
+            or (getattr(self, "tile", None) and self.readonly)
         ):
             self._im = None
 
