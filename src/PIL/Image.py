@@ -3818,7 +3818,9 @@ def blend(im1: Image, im2: Image, alpha: float) -> Image:
        copy of the first image is returned. If alpha is 1.0, a copy of
        the second image is returned. There are no restrictions on the
        alpha value. If necessary, the result is clipped to fit into
-       the allowed output range.
+       the allowed output range. In addition to the 8-bit modes, the
+       16-bit grayscale modes "I;16", "I;16L", "I;16B" and "I;16N" are
+       supported and keep their full 16-bit precision.
     :returns: An :py:class:`~PIL.Image.Image` object.
     """
 

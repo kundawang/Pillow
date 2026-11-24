@@ -29,8 +29,9 @@ ImagingBlend(Imaging imIn1, Imaging imIn2, float alpha) {
     int x, y;
 
     /* Check arguments */
-    if (!imIn1 || !imIn2 || imIn1->type != IMAGING_TYPE_UINT8 || imIn1->palette ||
-        imIn1->mode == IMAGING_MODE_1 || imIn2->palette ||
+    if (!imIn1 || !imIn2 ||
+        (imIn1->type != IMAGING_TYPE_UINT8 && imIn1->type != IMAGING_TYPE_I16) ||
+        imIn1->palette || imIn1->mode == IMAGING_MODE_1 || imIn2->palette ||
         imIn2->mode == IMAGING_MODE_1) {
         return ImagingError_ModeError();
     }
@@ -57,7 +58,64 @@ ImagingBlend(Imaging imIn1, Imaging imIn2, float alpha) {
     int ysize = imIn1->ysize;
     int linesize = imIn1->linesize;
 
-    if (alpha >= 0 && alpha <= 1.0) {
+    if (imIn1->type == IMAGING_TYPE_I16) {
+        /* 16-bit grayscale (I;16, I;16L, I;16B, I;16N). The four variants
+         * share a storage type but use different byte orders, so require
+         * identical modes before blending. Pixels are stored as pairs of
+         * bytes, either little- or big-endian depending on the mode; the
+         * output keeps the same byte order as the inputs. */
+        if (imIn1->mode != imIn2->mode) {
+            return ImagingError_Mismatch();
+        }
+        int bigendian = isImageI16BigEndian(imIn1);
+        int xsize = imIn1->xsize;
+
+        if (alpha >= 0 && alpha <= 1.0) {
+            /* Interpolate between bands */
+            for (y = 0; y < ysize; y++) {
+                // restrict safe: imIn1 and imIn2 are read-only; imOut is a
+                // new allocation
+                UINT8 *restrict in1 = (UINT8 *)imIn1->image[y];
+                UINT8 *restrict in2 = (UINT8 *)imIn2->image[y];
+                UINT8 *restrict out = (UINT8 *)imOut->image[y];
+                for (x = 0; x < xsize; x++) {
+                    int v1 = in1[x * 2 + (bigendian ? 1 : 0)] +
+                             ((int)in1[x * 2 + (bigendian ? 0 : 1)] << 8);
+                    int v2 = in2[x * 2 + (bigendian ? 1 : 0)] +
+                             ((int)in2[x * 2 + (bigendian ? 0 : 1)] << 8);
+                    int value = (int)(v1 + alpha * (v2 - v1));
+                    out[x * 2 + (bigendian ? 1 : 0)] = (UINT8)(value & 0xff);
+                    out[x * 2 + (bigendian ? 0 : 1)] = (UINT8)(value >> 8);
+                }
+            }
+        } else {
+            /* Extrapolation; must make sure to clip resulting values */
+            for (y = 0; y < ysize; y++) {
+                // restrict safe: imIn1 and imIn2 are read-only; imOut is a
+                // new allocation
+                UINT8 *restrict in1 = (UINT8 *)imIn1->image[y];
+                UINT8 *restrict in2 = (UINT8 *)imIn2->image[y];
+                UINT8 *restrict out = (UINT8 *)imOut->image[y];
+                for (x = 0; x < xsize; x++) {
+                    int v1 = in1[x * 2 + (bigendian ? 1 : 0)] +
+                             ((int)in1[x * 2 + (bigendian ? 0 : 1)] << 8);
+                    int v2 = in2[x * 2 + (bigendian ? 1 : 0)] +
+                             ((int)in2[x * 2 + (bigendian ? 0 : 1)] << 8);
+                    float temp = (float)(v1 + alpha * (v2 - v1));
+                    int value;
+                    if (temp <= 0.0) {
+                        value = 0;
+                    } else if (temp >= 65535.0) {
+                        value = 65535;
+                    } else {
+                        value = (int)temp;
+                    }
+                    out[x * 2 + (bigendian ? 1 : 0)] = (UINT8)(value & 0xff);
+                    out[x * 2 + (bigendian ? 0 : 1)] = (UINT8)(value >> 8);
+                }
+            }
+        }
+    } else if (alpha >= 0 && alpha <= 1.0) {
         /* Interpolate between bands */
         for (y = 0; y < ysize; y++) {
             // restrict safe: imIn1 and imIn2 are read-only; imOut is a new allocation

@@ -95,6 +95,14 @@ Blurring I;16 images
 :py:class:`~PIL.ImageFilter.GaussianBlur` and :py:class:`~PIL.ImageFilter.BoxBlur`
 now support I;16, I;16L, I;16B and I;16N images.
 
+Blending I;16 images
+^^^^^^^^^^^^^^^^^^^^
+
+:py:func:`~PIL.Image.blend` now supports I;16, I;16L, I;16B and I;16N images,
+interpolating at full 16-bit precision instead of requiring the images to be
+converted to 8-bit mode first. Results outside the 16-bit range are clipped to
+0-65535, and the output keeps the mode, size and byte order of the inputs.
+
 Respect Python build-tree configuration
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
