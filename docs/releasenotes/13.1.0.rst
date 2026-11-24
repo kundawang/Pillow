@@ -4,6 +4,15 @@
 Security
 ========
 
+Intermediate image size checks
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:py:func:`~PIL.ImageOps.cover` and :py:class:`~PIL.ImageFilter.RankFilter` now
+run decompression bomb checks against the intermediate image sizes produced by
+aspect-ratio expansion and filter-window border expansion. As with image
+opening, sizes above :py:data:`~PIL.Image.MAX_IMAGE_PIXELS` warn and sizes above
+twice that limit raise :py:exc:`~PIL.Image.DecompressionBombError`.
+
 TODO
 ^^^^
 
