@@ -49,6 +49,13 @@ TODO
 Other changes
 =============
 
+Added support for XML and XMP metadata in JPEG 2000
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+XML and XMP metadata will now be read into :py:attr:`~PIL.Image.Image.info` from JPEG
+2000 images. When saving, metadata can be specified using the ``xml`` or ``xmp``
+argument.
+
 Resizing I;16B and I;16N images
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

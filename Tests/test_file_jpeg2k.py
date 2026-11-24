@@ -582,3 +582,98 @@ def test_9bit() -> None:
     with Image.open("Tests/images/9bit.j2k") as im:
         assert im.mode == "I;16"
         assert im.size == (128, 128)
+
+
+def test_xml_metadata() -> None:
+    im = Image.new("L", (1, 1))
+    xml_boxes = ["xml metadata1", b"xml metadata2"]
+    for xml in xml_boxes:
+        out = BytesIO()
+        im.save(out, "JPEG2000", xml=xml)
+
+        with Image.open(out) as reloaded:
+            expected = xml.encode() if isinstance(xml, str) else xml
+            assert reloaded.info["xml"] == expected
+
+    # Multiple XML boxes
+    out = BytesIO()
+    im.save(out, "JPEG2000", xml=xml_boxes, comment="comment")
+    with Image.open(out) as im:
+        if isinstance(xml_boxes[0], str):
+            xml_boxes[0] = xml_boxes[0].encode()
+        assert im.info["xml"] == xml_boxes
+        assert im.info["comment"] == b"comment"
+
+
+@pytest.mark.parametrize("xmp", ("xmp", b"xmp"))
+def test_xmp_metadata(xmp: str | bytes) -> None:
+    im = Image.new("L", (1, 1))
+
+    out = BytesIO()
+    im.save(out, "JPEG2000", xmp=xmp)
+
+    with Image.open(out) as im:
+        if isinstance(xmp, str):
+            xmp = xmp.encode()
+        assert im.info["xmp"] == xmp
+
+
+def test_no_xml_metadata() -> None:
+    im = Image.new("L", (1, 1))
+
+    out = BytesIO()
+    im.save(out, "JPEG2000")
+
+    with Image.open(out) as reloaded:
+        assert "xml" not in reloaded.info
+        assert "xmp" not in reloaded.info
+
+
+def test_xml_metadata_unknown_box() -> None:
+    im = Image.new("L", (1, 1))
+
+    out = BytesIO()
+    im.save(out, "JPEG2000", xml="xml metadata")
+    data = out.getvalue()
+
+    # Insert an unknown box before the codestream; it should be skipped
+    i = data.index(b"jp2c") - 4
+    unknown_box = struct.pack(">I", 12) + b"abcd" + b"1234"
+    data = data[:i] + unknown_box + data[i:]
+
+    with Image.open(BytesIO(data)) as reloaded:
+        assert reloaded.info["xml"] == b"xml metadata"
+        assert_image_equal(reloaded, im)
+
+
+def test_xml_metadata_invalid_box_length() -> None:
+    im = Image.new("L", (1, 1))
+
+    out = BytesIO()
+    im.save(out, "JPEG2000", xml="xml metadata")
+    data = bytearray(out.getvalue())
+
+    # Corrupt the XML box so that its length extends beyond the file
+    i = data.index(b"xml ")
+    data[i - 4 : i] = struct.pack(">I", len(data))
+    with pytest.raises(OSError, match="Expected to read"):
+        Image.open(BytesIO(data))
+
+    # Truncate the file partway through the XML box
+    with pytest.raises(OSError, match="Expected to read"):
+        Image.open(BytesIO(bytes(data[: i + 4])))
+
+
+def test_last_box_extends_to_eof() -> None:
+    im = Image.new("L", (1, 1))
+
+    out = BytesIO()
+    im.save(out, "JPEG2000")
+    data = bytearray(out.getvalue())
+
+    # A box length of zero means the box extends to the end of the file
+    i = data.index(b"jp2c")
+    data[i - 4 : i] = b"\x00\x00\x00\x00"
+
+    with Image.open(BytesIO(bytes(data))) as reloaded:
+        assert_image_equal(reloaded, im)
