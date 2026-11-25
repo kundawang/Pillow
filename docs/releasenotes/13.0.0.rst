@@ -294,3 +294,13 @@ FriBiDi itself is not included in Pillow's wheels.
 
 The shim's source files now include SPDX license identifiers, and the SBOM has been
 corrected.
+
+Faster MinFilter and MaxFilter
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:py:class:`~PIL.ImageFilter.MinFilter` and :py:class:`~PIL.ImageFilter.MaxFilter`
+selected their result by sorting each window, which is unnecessary work when only
+the smallest or largest value is wanted. For ``L`` and ``I`` mode images they now
+scan the window directly, which is several times faster for large window sizes.
+Pixel results are unchanged. ``F`` mode still uses the original selection, so
+windows containing NaN or signed zero keep returning the same bits.

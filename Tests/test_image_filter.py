@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import struct
 
 import pytest
 
@@ -293,3 +294,87 @@ def test_rankfilter_size_1() -> None:
     assert im.filter(ImageFilter.MaxFilter(1)).getpixel((1, 1)) == 128
     assert im.filter(ImageFilter.MedianFilter(1)).getpixel((1, 1)) == 128
     assert im.filter(ImageFilter.RankFilter(1, 0)).getpixel((1, 1)) == 128
+
+
+def _naive_rank(
+    data: list[int], width: int, height: int, size: int, rank: int
+) -> list[int]:
+    """Reference rank filter on the output-sized image.
+
+    ``Image.filter`` first expands the border by ``size // 2`` using edge
+    replication and then filters, so every output pixel is the ``rank``-th
+    smallest value of a full window of the expanded image.
+    """
+    margin = size // 2
+
+    def pixel(x: int, y: int) -> int:
+        x = min(max(x, 0), width - 1)
+        y = min(max(y, 0), height - 1)
+        return data[y * width + x]
+
+    out = []
+    for y in range(height):
+        for x in range(width):
+            window = [
+                pixel(x + dx - margin, y + dy - margin)
+                for dy in range(size)
+                for dx in range(size)
+            ]
+            window.sort()
+            out.append(window[rank])
+    return out
+
+
+@pytest.mark.parametrize("mode", ("L", "I"))
+@pytest.mark.parametrize("size", (1, 3, 5, 7))
+def test_rankfilter_extremes_match_naive(mode: str, size: int) -> None:
+    # Small matrix with duplicated and extreme values, covering window edges,
+    # the special-cased min/max ranks, and a different odd window size.
+    width = height = 11
+    patterns = {
+        "L": (0, 255, 0, 255, 128, 3, 3, 200),
+        "I": (-(2**31), 2**31 - 1, 0, 7, -7),
+    }
+    pattern = patterns[mode]
+    values = [pattern[n % len(pattern)] for n in range(width * height)]
+    im = Image.new(mode, (width, height))
+    im.putdata(values)
+
+    for filter_class, rank in (
+        (ImageFilter.MinFilter, 0),
+        (ImageFilter.MaxFilter, size * size - 1),
+        (ImageFilter.MedianFilter, size * size // 2),
+    ):
+        expected = _naive_rank(values, width, height, size, rank)
+        result = list(im.filter(filter_class(size)).get_flattened_data())
+        assert result == expected
+
+
+@pytest.mark.parametrize("size", (1, 3, 5, 9))
+def test_rankfilter_min_max_uniform_image(size: int) -> None:
+    im = Image.new("L", (16, 16), 77)
+    for filter_class in (ImageFilter.MinFilter, ImageFilter.MaxFilter):
+        assert im.filter(filter_class(size)).getextrema() == (77, 77)
+
+
+def test_rankfilter_float_nan_and_signed_zero_unchanged() -> None:
+    # Windows containing NaN or signed zero are not ordered by the comparison
+    # operators.  F mode keeps using rank selection, so the exact bits returned
+    # for such windows must not change.
+    im = Image.frombytes(
+        "F", (3, 3), struct.pack("<9f", 5.0, -0.0, 0.0, 9, 9, 9, 9, 9, 9)
+    )
+    assert (
+        math.copysign(1.0, im.filter(ImageFilter.MinFilter(3)).getpixel((1, 1))) == -1.0
+    )
+
+    nan = float("nan")
+    im = Image.frombytes(
+        "F", (3, 3), struct.pack("<9f", nan, 3.0, 2.0, 1, 4, 5, 0, 8, 7)
+    )
+    minimum = im.filter(ImageFilter.MinFilter(3))
+    maximum = im.filter(ImageFilter.MaxFilter(3))
+    assert minimum.getpixel((1, 1)) == 0.0
+    assert math.isnan(maximum.getpixel((0, 0)))
+    assert math.isnan(maximum.getpixel((1, 0)))
+    assert maximum.getpixel((1, 1)) == 8.0

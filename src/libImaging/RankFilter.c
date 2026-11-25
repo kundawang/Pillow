@@ -58,11 +58,40 @@
     }
 
 MakeRankFunction(UINT8) MakeRankFunction(INT32) MakeRankFunction(FLOAT32)
+/* Min and max only need to track the single extreme value of each window
+   instead of selecting an arbitrary rank.  Scanning every pixel of the
+   window with a plain comparison avoids the partitioning and data movement
+   of a full rank selection.
+
+   This is only used for integer pixels.  Integer comparisons are exact, so
+   the scan agrees with the rank selection at every tie.  Floating point is
+   excluded: NaN never compares ordered and -0.0 == 0.0, so the value the
+   partition returns for such windows is an implementation artifact, and
+   rewriting the algorithm must not change which bit pattern is produced. */
+#define MakeExtremumBody(type, worse)                                 \
+    do {                                                              \
+        for (y = 0; y < imOut->ysize; y++) {                          \
+            type *out = (type *)imOut->image[y];                      \
+            for (x = 0; x < imOut->xsize; x++) {                      \
+                type best = ((const type *)im->image[y])[x];          \
+                for (i = 0; i < size; i++) {                          \
+                    const type *row = (const type *)im->image[y + i]; \
+                    for (j = 0; j < size; j++) {                      \
+                        type value = row[x + j];                      \
+                        if (value worse best) {                       \
+                            best = value;                             \
+                        }                                             \
+                    }                                                 \
+                }                                                     \
+                out[x] = best;                                        \
+            }                                                         \
+        }                                                             \
+    } while (0)
 
     Imaging ImagingRankFilter(Imaging im, int size, int rank) {
     Imaging imOut = NULL;
     int x, y;
-    int i, margin, size2;
+    int i, j, margin, size2;
 
     if (!im || im->bands != 1 || im->type == IMAGING_TYPE_I16) {
         return (Imaging)ImagingError_ModeError();
@@ -113,10 +142,24 @@ MakeRankFunction(UINT8) MakeRankFunction(INT32) MakeRankFunction(FLOAT32)
     } while (0)
 
     if (im->image8) {
-        RANK_BODY(UINT8);
+        if (rank == 0) {
+            MakeExtremumBody(UINT8, <);
+        } else if (rank == size2 - 1) {
+            MakeExtremumBody(UINT8, >);
+        } else {
+            RANK_BODY(UINT8);
+        }
     } else if (im->type == IMAGING_TYPE_INT32) {
-        RANK_BODY(INT32);
+        if (rank == 0) {
+            MakeExtremumBody(INT32, <);
+        } else if (rank == size2 - 1) {
+            MakeExtremumBody(INT32, >);
+        } else {
+            RANK_BODY(INT32);
+        }
     } else if (im->type == IMAGING_TYPE_FLOAT32) {
+        /* Floating point keeps the rank selection so that windows containing
+           NaN or signed zero produce the same bits as before. */
         RANK_BODY(FLOAT32);
     } else {
         /* safety net (we shouldn't end up here) */
