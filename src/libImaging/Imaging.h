@@ -249,8 +249,26 @@ ImagingPaletteCacheDelete(ImagingPalette palette);
 #define ImagingPaletteCache(p, r, g, b) \
     p->cache[(r >> 2) + (g >> 2) * 64 + (b >> 2) * 64 * 64]
 
+/* Dithering options for ImagingConvert().
+ * The C core historically treats this as a boolean flag: anything nonzero
+ * selects Floyd-Steinberg dithering. The named values make call sites
+ * self-documenting; keep NONE == 0 and FLOYDSTEINBERG nonzero. */
+typedef enum {
+    IMAGING_DITHER_NONE = 0,
+    IMAGING_DITHER_FLOYDSTEINBERG = 3, /* matches PIL.Image.Dither values */
+} ImagingDitherMode;
+
+/* Quantization methods for ImagingQuantize(); values match
+ * PIL.Image.Quantize. */
+typedef enum {
+    IMAGING_QUANTIZE_MEDIANCUT = 0,
+    IMAGING_QUANTIZE_MAXCOVERAGE = 1,
+    IMAGING_QUANTIZE_FASTOCTREE = 2,
+    IMAGING_QUANTIZE_LIBIMAGEQUANT = 3,
+} ImagingQuantizeMode;
+
 extern Imaging
-ImagingQuantize(Imaging im, int colours, int mode, int kmeans);
+ImagingQuantize(Imaging im, int colours, ImagingQuantizeMode mode, int kmeans);
 
 /* Threading */
 /* --------- */
@@ -277,20 +295,25 @@ ImagingError_ValueError(const char *message);
 /* Transform callbacks */
 /* ------------------- */
 
-/* standard transforms */
-#define IMAGING_TRANSFORM_AFFINE 0
-#define IMAGING_TRANSFORM_PERSPECTIVE 2
-#define IMAGING_TRANSFORM_QUAD 3
+/* standard transform methods; values match PIL.Image.Transform */
+typedef enum {
+    IMAGING_TRANSFORM_AFFINE = 0,
+    IMAGING_TRANSFORM_PERSPECTIVE = 2,
+    IMAGING_TRANSFORM_QUAD = 3,
+} ImagingTransformMethod;
 
-/* standard filters */
-#define IMAGING_TRANSFORM_NEAREST 0
-#define IMAGING_TRANSFORM_BOX 4
-#define IMAGING_TRANSFORM_BILINEAR 2
-#define IMAGING_TRANSFORM_HAMMING 5
-#define IMAGING_TRANSFORM_BICUBIC 3
-#define IMAGING_TRANSFORM_LANCZOS 1
-#define IMAGING_TRANSFORM_MKS2013 6
-#define IMAGING_TRANSFORM_MKS2021 7
+/* standard resampling/transform filters; values match
+ * PIL.Image.Resampling */
+typedef enum {
+    IMAGING_TRANSFORM_NEAREST = 0,
+    IMAGING_TRANSFORM_LANCZOS = 1,
+    IMAGING_TRANSFORM_BILINEAR = 2,
+    IMAGING_TRANSFORM_BICUBIC = 3,
+    IMAGING_TRANSFORM_BOX = 4,
+    IMAGING_TRANSFORM_HAMMING = 5,
+    IMAGING_TRANSFORM_MKS2013 = 6,
+    IMAGING_TRANSFORM_MKS2021 = 7,
+} ImagingTransformFilterID;
 
 typedef int (*ImagingTransformMap)(double *X, double *Y, int x, int y, void *data);
 typedef int (*ImagingTransformFilter)(void *out, Imaging im, double x, double y);
@@ -306,7 +329,11 @@ extern Imaging
 ImagingCopy(Imaging im);
 extern Imaging
 ImagingConvert(
-    Imaging imOut, Imaging imIn, ModeID mode, ImagingPalette palette, int dither
+    Imaging imOut,
+    Imaging imIn,
+    ModeID mode,
+    ImagingPalette palette,
+    ImagingDitherMode dither
 );
 extern Imaging
 ImagingConvertMatrix(Imaging im, ModeID mode, const float m[12]);
@@ -386,20 +413,26 @@ ImagingTranspose(Imaging imOut, Imaging imIn);
 extern Imaging
 ImagingTransverse(Imaging imOut, Imaging imIn);
 extern Imaging
-ImagingResample(Imaging imIn, int xsize, int ysize, int filter, float box[4]);
+ImagingResample(
+    Imaging imIn,
+    int xsize,
+    int ysize,
+    ImagingTransformFilterID filter,
+    float box[4]
+);
 extern Imaging
 ImagingReduce(Imaging imIn, int xscale, int yscale, int box[4]);
 extern int
 ImagingTransform(
     Imaging imOut,
     Imaging imIn,
-    int method,
+    ImagingTransformMethod method,
     int x0,
     int y0,
     int x1,
     int y1,
     double a[8],
-    int filter,
+    ImagingTransformFilterID filter,
     int fill
 );
 extern Imaging

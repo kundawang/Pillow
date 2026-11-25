@@ -1013,7 +1013,7 @@ _color_lut_3d(ImagingObject *self, PyObject *args) {
 static PyObject *
 _convert(ImagingObject *self, PyObject *args) {
     char *mode_name;
-    int dither = 0;
+    int dither = IMAGING_DITHER_NONE;
     ImagingObject *paletteimage = NULL;
 
     if (!PyArg_ParseTuple(args, "s|iO", &mode_name, &dither, &paletteimage)) {
@@ -1040,7 +1040,7 @@ _convert(ImagingObject *self, PyObject *args) {
         self->image,
         mode,
         paletteimage ? paletteimage->image->palette : NULL,
-        dither
+        (ImagingDitherMode)dither
     ));
 }
 
@@ -1051,7 +1051,13 @@ _convert_into(ImagingObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (!ImagingConvert(imagep->image, self->image, imagep->image->mode, NULL, 0)) {
+    if (!ImagingConvert(
+            imagep->image,
+            self->image,
+            imagep->image->mode,
+            NULL,
+            IMAGING_DITHER_NONE
+        )) {
         return NULL;
     }
 
@@ -1803,7 +1809,7 @@ _putdata(ImagingObject *self, PyObject *args) {
 static PyObject *
 _quantize(ImagingObject *self, PyObject *args) {
     int colours = 256;
-    int method = 0;
+    int method = IMAGING_QUANTIZE_MEDIANCUT;
     int kmeans = 0;
     if (!PyArg_ParseTuple(args, "|iii", &colours, &method, &kmeans)) {
         return NULL;
@@ -1816,7 +1822,9 @@ _quantize(ImagingObject *self, PyObject *args) {
         );
     }
 
-    return PyImagingNew(ImagingQuantize(self->image, colours, method, kmeans));
+    return PyImagingNew(ImagingQuantize(
+        self->image, colours, (ImagingQuantizeMode)method, kmeans
+    ));
 }
 
 static PyObject *
@@ -2044,13 +2052,24 @@ _resize(ImagingObject *self, PyObject *args) {
         }
 
         if (ImagingTransform(
-                imOut, imIn, IMAGING_TRANSFORM_AFFINE, 0, 0, xsize, ysize, a, filter, 1
+                imOut,
+                imIn,
+                IMAGING_TRANSFORM_AFFINE,
+                0,
+                0,
+                xsize,
+                ysize,
+                a,
+                (ImagingTransformFilterID)filter,
+                1
             )) {
             ImagingDelete(imOut);
             return NULL;
         }
     } else {
-        imOut = ImagingResample(imIn, xsize, ysize, filter, box);
+        imOut = ImagingResample(
+            imIn, xsize, ysize, (ImagingTransformFilterID)filter, box
+        );
     }
 
     return PyImagingNew(imOut);
@@ -2151,7 +2170,7 @@ _transform(ImagingObject *self, PyObject *args) {
         return NULL;
     }
 
-    switch (method) {
+    switch ((ImagingTransformMethod)method) {
         case IMAGING_TRANSFORM_AFFINE:
             n = 6;
             break;
@@ -2171,7 +2190,16 @@ _transform(ImagingObject *self, PyObject *args) {
     }
 
     int error = ImagingTransform(
-        self->image, imagep->image, method, x0, y0, x1, y1, a, filter, fill
+        self->image,
+        imagep->image,
+        (ImagingTransformMethod)method,
+        x0,
+        y0,
+        x1,
+        y1,
+        a,
+        (ImagingTransformFilterID)filter,
+        fill
     );
 
     free(a);
