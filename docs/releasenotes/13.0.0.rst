@@ -294,3 +294,15 @@ FriBiDi itself is not included in Pillow's wheels.
 
 The shim's source files now include SPDX license identifiers, and the SBOM has been
 corrected.
+
+Writing nested EXIF sub-IFDs in uncompressed TIFFs
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Caller-provided nested dictionaries for EXIF, GPS and Interoperability IFDs
+are now written out recursively by the pure-Python TIFF writer, including
+correct offsets in both little-endian and big-endian classic TIFF and
+BigTIFF files. IFDs created with :py:meth:`~PIL.Image.Exif.get_ifd` but not
+assigned to a top-level tag are also preserved when saving an
+:py:class:`~PIL.Image.Exif` object as TIFF, and invalid nested values raise
+a :py:class:`TypeError` or :py:class:`ValueError` instead of producing a
+dangling pointer tag.

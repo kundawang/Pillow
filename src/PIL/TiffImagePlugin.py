@@ -82,6 +82,20 @@ READ_LIBTIFF = False
 WRITE_LIBTIFF = False
 STRIP_SIZE = 65536
 
+
+class InvalidIFDValueError(TypeError, ValueError):
+    """An invalid value was supplied for a nested TIFF IFD.
+
+    Subclassing both :class:`TypeError` and :class:`ValueError` lets callers
+    catch either category for malformed caller-provided IFD dictionaries.
+    """
+
+
+# Tags whose value is an offset (or offsets) to one or more nested IFDs.
+# These are the EXIF family pointer tags (ExifIFD, GPSInfoIFD and
+# InteroperabilityIFD) and the TIFF/EP SubIFDs tag.
+IFD_POINTER_TAGS = frozenset({330, 34665, 34853, 40965})
+
 II = b"II"  # little-endian (Intel style)
 MM = b"MM"  # big-endian (Motorola style)
 
@@ -526,6 +540,37 @@ else:
     _IFDv2Base = MutableMapping
 
 
+def _validate_nested_ifd(tag: int, value: Any) -> None:
+    """Check a caller-provided nested IFD dictionary before serializing it."""
+    if not isinstance(value, MutableMapping):
+        msg = (
+            f"Value for IFD tag {tag} must be a dictionary of nested tags, "
+            f"got {type(value).__name__}"
+        )
+        raise InvalidIFDValueError(msg)
+    for ifd_tag in value:
+        if not isinstance(ifd_tag, int) or not 0 <= ifd_tag <= 0xFFFF:
+            msg = (
+                f"Nested IFD tag keys must be integers in the range 0..65535, "
+                f"got {ifd_tag!r}"
+            )
+            raise InvalidIFDValueError(msg)
+
+
+def _validate_ifd_pointer_value(tag: int, value: Any) -> None:
+    """Check a raw (non-dictionary) value assigned to an IFD pointer tag."""
+    if isinstance(value, MutableMapping):
+        return
+    values = value if isinstance(value, (tuple, list)) else (value,)
+    for pointer in values:
+        if isinstance(pointer, bool) or not isinstance(pointer, int):
+            msg = (
+                f"IFD pointer tag {tag} requires a dictionary or an integer "
+                f"offset, got {type(pointer).__name__}"
+            )
+            raise InvalidIFDValueError(msg)
+
+
 class ImageFileDirectory_v2(_IFDv2Base):
     """This class represents a TIFF tag directory.  To speed things up, we
     don't decode tags unless they're asked for.
@@ -617,7 +662,7 @@ class ImageFileDirectory_v2(_IFDv2Base):
         else:
             msg = "not a TIFF IFD"
             raise SyntaxError(msg)
-        self._bigtiff = ifh[2] == 43
+        self._bigtiff = 43 in ifh[2:4]
         self.group = group
         self.tagtype: dict[int, int] = {}
         """ Dictionary of tag types """
@@ -689,6 +734,17 @@ class ImageFileDirectory_v2(_IFDv2Base):
         info = TiffTags.lookup(tag, self.group)
         values = [value] if isinstance(value, basetypes) else value
 
+        if tag in IFD_POINTER_TAGS and not isinstance(value, MutableMapping):
+            if not isinstance(values, (tuple, list)):
+                # ``None`` or another non-iterable caller value. Decoded tag
+                # data is always a tuple, so this never triggers while reading.
+                _validate_ifd_pointer_value(tag, value)
+
+        if isinstance(value, MutableMapping) and tag not in self.tagtype:
+            # A caller-provided dictionary is a nested IFD. Its pointer tag
+            # is a LONG, even for tags that are not known to TiffTags.
+            self.tagtype[tag] = TiffTags.LONG
+
         if tag not in self.tagtype:
             if info.type:
                 self.tagtype[tag] = info.type
@@ -736,7 +792,13 @@ class ImageFileDirectory_v2(_IFDv2Base):
         elif self.tagtype[tag] == TiffTags.RATIONAL:
             values = [float(v) if isinstance(v, int) else v for v in values]
 
-        is_ifd = self.tagtype[tag] == TiffTags.LONG and isinstance(values, dict)
+        is_ifd = isinstance(values, MutableMapping)
+        if is_ifd and self.tagtype[tag] not in (
+            TiffTags.LONG,
+            TiffTags.IFD,
+            TiffTags.LONG8,
+        ):
+            self.tagtype[tag] = TiffTags.LONG
         if not is_ifd:
             values = tuple(
                 info.cvt_enum(value) if isinstance(value, str) else value
@@ -992,16 +1054,31 @@ class ImageFileDirectory_v2(_IFDv2Base):
                 stripoffsets = len(entries)
             typ = self.tagtype[tag]
             logger.debug("Tag %s, Type: %s, Value: %s", tag, typ, repr(value))
-            is_ifd = typ == TiffTags.LONG and isinstance(value, dict)
+            is_ifd = isinstance(value, MutableMapping)
             if is_ifd:
+                _validate_nested_ifd(tag, value)
+                if self._bigtiff and offset >= 2**32:
+                    # Offset is too large for a LONG
+                    # BigTIFF allows an 8-byte offset to the sub-IFD
+                    typ = TiffTags.LONG8
+                elif typ not in (TiffTags.LONG, TiffTags.LONG8):
+                    typ = TiffTags.LONG
                 ifd = ImageFileDirectory_v2(self._get_ifh(), group=tag)
                 values = self._tags_v2[tag]
                 for ifd_tag, ifd_value in values.items():
                     ifd[ifd_tag] = ifd_value
                 data = ifd.tobytes(offset)
             else:
+                if tag in IFD_POINTER_TAGS:
+                    _validate_ifd_pointer_value(tag, value)
                 values = value if isinstance(value, tuple) else (value,)
-                data = self._write_dispatch[typ](self, *values)
+                try:
+                    data = self._write_dispatch[typ](self, *values)
+                except struct.error as e:
+                    if tag in IFD_POINTER_TAGS:
+                        msg = f"Invalid offset value for IFD pointer tag {tag}: {e}"
+                        raise InvalidIFDValueError(msg) from e
+                    raise
 
             tagname = TiffTags.lookup(tag, self.group).name
             typname = "ifd" if is_ifd else TYPES.get(typ, "unknown")
@@ -1018,20 +1095,40 @@ class ImageFileDirectory_v2(_IFDv2Base):
                 count = len(values)
             # figure out if data fits into the entry
             if len(data) <= fmt_size:
-                entries.append((tag, typ, count, data.ljust(fmt_size, b"\0"), b""))
+                entry_value = data.ljust(fmt_size, b"\0")
+                data = b""
             else:
-                entries.append((tag, typ, count, self._pack(fmt, offset), data))
+                if is_ifd and typ == TiffTags.LONG and self._bigtiff:
+                    # The offset needs to be left-justified within a BigTIFF
+                    # entry, because only the first 4 bytes will be read from
+                    # this LONG, regardless of endianness
+                    entry_value = self._pack("L", offset).ljust(fmt_size, b"\0")
+                else:
+                    entry_value = self._pack(fmt, offset)
                 offset += (len(data) + 1) // 2 * 2  # pad to word
+            entries.append((tag, typ, count, entry_value, data))
 
         # update strip offset data to point beyond auxiliary data
         if stripoffsets is not None:
             tag, typ, count, value, data = entries[stripoffsets]
+            size, handler = self._load_dispatch[typ]
+            values = [
+                val + offset for val in handler(self, data or value, self.legacy_api)
+            ]
             if data:
-                size, handler = self._load_dispatch[typ]
-                values = [val + offset for val in handler(self, data, self.legacy_api)]
                 data = self._write_dispatch[typ](self, *values)
             else:
-                value = self._pack(fmt, self._unpack(fmt, value)[0] + offset)
+                # The offsets fit within the entry
+                if (
+                    self._bigtiff
+                    and typ == TiffTags.LONG
+                    and count == 1
+                    and values[0] >= 2**32
+                ):
+                    # If a single offset is too large for a LONG,
+                    # in BigTIFF there is room to change the entry to LONG8
+                    typ = TiffTags.LONG8
+                value = self._write_dispatch[typ](self, *values).ljust(fmt_size, b"\0")
             entries[stripoffsets] = tag, typ, count, value, data
 
         # pass 2: write entries to file
@@ -1196,7 +1293,7 @@ class TiffImageFile(ImageFile.ImageFile):
         # Header
         assert self.fp is not None
         ifh = self.fp.read(8)
-        if ifh[2] == 43:
+        if 43 in ifh[2:4]:
             ifh += self.fp.read(8)
 
         self.tag_v2 = ImageFileDirectory_v2(ifh)
@@ -1766,6 +1863,7 @@ def _save(im: Image.Image, fp: IO[bytes], filename: str | bytes) -> None:
     ifd[IMAGELENGTH] = im.size[1]
 
     # write any arbitrary tags passed in as an ImageFileDirectory
+    subifds: list[int] = []
     if "tiffinfo" in encoderinfo:
         info = encoderinfo["tiffinfo"]
     elif "exif" in encoderinfo:
@@ -1774,14 +1872,38 @@ def _save(im: Image.Image, fp: IO[bytes], filename: str | bytes) -> None:
             exif = Image.Exif()
             exif.load(info)
             info = exif
+        elif isinstance(info, Image.Exif) and not libtiff:
+            # IFDs created with Exif.get_ifd() are held in ``_ifds`` and
+            # may not have a corresponding pointer tag in the main dict yet.
+            subifds.extend(
+                key for key in TiffTags.TAGS_V2_GROUPS if info._ifds.get(key, {}) != {}
+            )
     else:
         info = {}
     logger.debug("Tiffinfo Keys: %s", list(info))
     if isinstance(info, ImageFileDirectory_v1):
         info = info.to_v2()
-    for key in info:
+    for key in {*info, *subifds}:
         if isinstance(info, Image.Exif) and key in TiffTags.TAGS_V2_GROUPS:
-            ifd[key] = info.get_ifd(key)
+            ifd_value = info.get_ifd(key)
+            if not libtiff and key == EXIFIFD and isinstance(ifd_value, dict):
+                # An embedded Interoperability IFD may still be represented
+                # by its source-file offset inside the Exif IFD. Replace that
+                # stale pointer with the actual nested dictionary so that it
+                # is written out recursively instead of pointing at the wrong
+                # location in the new file.
+                interop = ifd_value.get(ExifTags.IFD.Interop)
+                if not isinstance(interop, dict):
+                    try:
+                        interop = info.get_ifd(ExifTags.IFD.Interop)
+                    except Exception:
+                        interop = info._ifds.get(ExifTags.IFD.Interop)
+                    if interop:
+                        ifd_value = {
+                            **ifd_value,
+                            ExifTags.IFD.Interop: interop,
+                        }
+            ifd[key] = ifd_value
         else:
             ifd[key] = info.get(key)
         try:
