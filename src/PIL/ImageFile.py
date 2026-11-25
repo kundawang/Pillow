@@ -525,6 +525,7 @@ class Parser:
     decoder: Image.core.ImagingDecoder | PyDecoder | None = None
     offset = 0
     finished = 0
+    error: Exception | None = None
 
     def reset(self) -> None:
         """
@@ -542,6 +543,9 @@ class Parser:
         :exception OSError: If the parser failed to parse the image file.
         """
         # collect data
+
+        if self.error is not None:
+            raise self.error
 
         if self.finished:
             return
@@ -570,7 +574,8 @@ class Parser:
                 if e < 0:
                     # decoding error
                     self.image = None
-                    raise _get_oserror(e, encoder=False)
+                    self.error = _get_oserror(e, encoder=False)
+                    raise self.error
                 else:
                     # end of image
                     return
@@ -587,25 +592,44 @@ class Parser:
             try:
                 with io.BytesIO(self.data) as fp:
                     im = Image.open(fp)
-            except OSError:
+            except (OSError, ValueError):
                 pass  # not enough data
             else:
                 flag = hasattr(im, "load_seek") or hasattr(im, "load_read")
                 if not flag and len(im.tile) == 1:
                     # initialize decoder
-                    im.load_prepare()
-                    d, e, o, a = im.tile[0]
-                    im.tile = []
-                    self.decoder = Image._getdecoder(im.mode, d, a, im.decoderconfig)
-                    self.decoder.setimage(im.im, e)
+                    decoder_name, extents, offset, args = im.tile[0]
+                    decoder = Image._getdecoder(
+                        im.mode, decoder_name, args, im.decoderconfig
+                    )
+                    if decoder.pulls_fd:
+                        # A decoder that pulls from the file object cannot use
+                        # the data fed to the parser, so wait until all of the
+                        # data has arrived and decode it from a readable file
+                        # in close().
+                        self.image = im
+                    elif not self.data or offset >= len(self.data):
+                        # The header ends exactly at the end of the data that
+                        # has arrived, so it may have been terminated by the
+                        # end of the data rather than by a real delimiter.
+                        # Wait for more data, or for close() to reopen the
+                        # complete file.
+                        pass
+                    else:
+                        im.load_prepare()
+                        im.tile = []
+                        self.decoder = decoder
+                        self.decoder.setimage(im.im, extents)
 
-                    # calculate decoder offset
-                    self.offset = o
-                    if self.offset <= len(self.data):
-                        self.data = self.data[self.offset :]
-                        self.offset = 0
+                        # calculate decoder offset
+                        self.offset = offset
+                        if self.offset <= len(self.data):
+                            self.data = self.data[self.offset :]
+                            self.offset = 0
 
-                self.image = im
+                        self.image = im
+                else:
+                    self.image = im
 
     def __enter__(self) -> Self:
         return self
@@ -622,26 +646,39 @@ class Parser:
                             because it cannot be identified or cannot be
                             decoded.
         """
-        # finish decoding
-        if self.decoder:
-            # get rid of what's left in the buffers
-            self.feed(b"")
-            self.data = self.decoder = None
-            if not self.finished:
-                msg = "image was incomplete"
-                raise OSError(msg)
-        if not self.image:
-            msg = "cannot parse this image"
-            raise OSError(msg)
-        if self.data:
-            # incremental parsing not possible; reopen the file
-            # not that we have all data
-            with io.BytesIO(self.data) as fp:
+        if self.error is not None:
+            raise self.error
+
+        try:
+            # finish decoding
+            if self.decoder:
                 try:
-                    self.image = Image.open(fp)
+                    # get rid of what's left in the buffers
+                    self.feed(b"")
                 finally:
+                    # release the decoder and any unconsumed data, so that a
+                    # repeated close() cannot decode a second time
+                    self.decoder = None
+                    self.data = None
+                if not self.finished:
+                    msg = "image was incomplete"
+                    raise OSError(msg)
+            if self.data:
+                # incremental parsing not possible; decode from a readable
+                # file that now contains all of the data
+                with io.BytesIO(self.data) as fp:
+                    self.image = Image.open(fp)
                     self.image.load()
-        return self.image
+                self.data = None
+            if not self.image:
+                msg = "cannot parse this image"
+                raise OSError(msg)
+            return self.image
+        except Exception as e:
+            # Preserve the failure so that a repeated close() reports it again
+            # instead of returning an incomplete image.
+            self.error = e
+            raise
 
 
 # --------------------------------------------------------------------

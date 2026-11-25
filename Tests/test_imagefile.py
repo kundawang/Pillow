@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random as random_module
 import tempfile
 from io import BytesIO
 from typing import Any
@@ -83,6 +84,101 @@ class TestImageFile:
 
         with pytest.raises(OSError):
             roundtrip("PDF")
+
+    @pytest.mark.parametrize(
+        "path",
+        (
+            "Tests/images/hopper.qoi",
+            "Tests/images/hopper.sgi",
+            "Tests/images/hopper.dds",
+            "Tests/images/m13_gzip.fits",
+            "Tests/images/hopper.ppm",
+            "Tests/images/hopper.fits",
+            "Tests/images/hopper.bmp",
+            "Tests/images/hopper.png",
+            "Tests/images/hopper.tif",
+        ),
+    )
+    @pytest.mark.parametrize("chunk_size", (1, 3, 13, 97, 1024, None))
+    def test_parser_chunked(self, path: str, chunk_size: int | None) -> None:
+        # The same file, fed in different sized chunks (including empty ones),
+        # must produce the same image as Image.open(). A chunk size of None
+        # uses pseudo-random chunk sizes.
+        with open(path, "rb") as f:
+            data = f.read()
+
+        with Image.open(path) as im:
+            expected = im.copy()
+
+        random = random_module.Random(0)
+        p = ImageFile.Parser()
+        i = 0
+        while i < len(data):
+            p.feed(b"")
+            size = random.randint(1, 257) if chunk_size is None else chunk_size
+            p.feed(data[i : i + size])
+            i += size
+        p.feed(b"")
+        assert_image_equal(p.close(), expected)
+
+    @pytest.mark.parametrize(
+        "path",
+        (
+            "Tests/images/hopper.qoi",
+            "Tests/images/hopper.sgi",
+            "Tests/images/hopper.ppm",
+            "Tests/images/hopper.bmp",
+        ),
+    )
+    def test_parser_truncated(self, path: str) -> None:
+        with open(path, "rb") as f:
+            data = f.read()
+
+        # A truncated file must behave the same way as Image.open(), whichever
+        # point it is cut off at
+        for length in (len(data) // 3, len(data) // 2, len(data) - 1):
+            truncated = data[:length]
+            p = ImageFile.Parser()
+            for i in range(0, length, 17):
+                p.feed(truncated[i : i + 17])
+
+            try:
+                with Image.open(BytesIO(truncated)) as im:
+                    im.load()
+            except Exception as e:
+                with pytest.raises(type(e)):
+                    p.close()
+            else:
+                assert_image_equal(p.close(), im)
+
+    def test_parser_duplicate_close(self) -> None:
+        with open("Tests/images/hopper.qoi", "rb") as f:
+            data = f.read()
+
+        p = ImageFile.Parser()
+        p.feed(data)
+        first = p.close()
+        # Closing again returns the same, already decoded, image
+        assert p.close() is first
+
+    def test_parser_duplicate_close_after_error(self) -> None:
+        p = ImageFile.Parser()
+        p.feed(b"not an image")
+        with pytest.raises(OSError):
+            p.close()
+
+        # The failure is preserved rather than reporting a partial image
+        with pytest.raises(OSError):
+            p.close()
+
+    def test_parser_close_without_data(self) -> None:
+        p = ImageFile.Parser()
+        with pytest.raises(OSError, match="cannot parse this image"):
+            p.close()
+
+        # The failure is preserved
+        with pytest.raises(OSError, match="cannot parse this image"):
+            p.close()
 
     def test_ico(self) -> None:
         with open("Tests/images/python.ico", "rb") as f:

@@ -69,7 +69,10 @@ class FitsImageFile(ImageFile.ImageFile):
             msg = "No image data"
             raise ValueError(msg)
 
-        offset += self.fp.tell() - 80
+        # The data unit starts where the card that ended the header began.
+        # Use the actual length read, since the final card can be shorter than
+        # 80 bytes if the end of the file cuts it short.
+        offset += self.fp.tell() - len(header)
         self.tile = [ImageFile._Tile(decoder_name, (0, 0, *self.size), offset, args)]
 
     def _get_size(

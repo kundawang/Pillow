@@ -283,6 +283,26 @@ Fixed opening XBM images with comments
 XBM images with C-style ``/* ... */`` comments in the header could not be identified.
 Comments on separate lines before the bits declaration are now skipped.
 
+Fixed ImageFile.Parser with decoders that read from the file
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:py:class:`~PIL.ImageFile.Parser` attempted to decode incrementally even when the
+format's decoder pulls data from the file object itself, such as QOI. Without a file
+object to read from, this failed with an ``AssertionError``. The parser now keeps the
+full input for these formats and decodes it from a readable file when
+:py:meth:`~PIL.ImageFile.Parser.close` is called. Streaming decoders continue to
+produce output as before.
+
+The parser also no longer commits to a header that ends exactly at the end of the data
+received so far, since the last token may have been terminated by the end of the data
+rather than by a delimiter. This fixes FITS images whose final header card is cut short
+by the end of the file, and PPM images whose final header token is followed immediately
+by the image data.
+
+Calling :py:meth:`~PIL.ImageFile.Parser.close` more than once now returns the same
+image, or raises the same error again, instead of raising an ``AssertionError`` or
+returning a partially decoded image.
+
 Clarified FriBiDi shim license
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
