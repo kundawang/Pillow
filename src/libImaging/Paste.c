@@ -409,25 +409,50 @@ fill_mask_1(
     /* fill with mode "1" mask */
 
     int x, y;
-    UINT8 ink8 = 0;
-    INT32 ink32 = 0L;
-
-    memcpy(&ink32, ink_, pixelsize);
-    memcpy(&ink8, ink_, sizeof(ink8));
 
     if (imOut->image8) {
+        int i16 = isModeI16(imOut->mode);
+        UINT16 ink16 = 0;
+        if (i16) {
+            const UINT8 *ink_bytes = ink_;
+            UINT8 ordered_ink[2];
+            if (imOut->mode == IMAGING_MODE_I_16B
+#ifdef WORDS_BIGENDIAN
+                || imOut->mode == IMAGING_MODE_I_16N
+#endif
+            ) {
+                ordered_ink[0] = ink_bytes[1];
+                ordered_ink[1] = ink_bytes[0];
+            } else {
+                ordered_ink[0] = ink_bytes[0];
+                ordered_ink[1] = ink_bytes[1];
+            }
+            memcpy(&ink16, ordered_ink, sizeof(ink16));
+        }
+
         for (y = 0; y < ysize; y++) {
-            UINT8 *out = imOut->image8[y + dy] + dx;
             UINT8 *mask = imMask->image8[y + sy] + sx;
-            for (x = 0; x < xsize; x++) {
-                if (*mask++) {
-                    *out = ink8;
+            if (i16) {
+                UINT16 *out = (UINT16 *)imOut->image8[y + dy] + dx;
+                for (x = 0; x < xsize; x++) {
+                    if (*mask++) {
+                        out[x] = ink16;
+                    }
                 }
-                out++;
+            } else {
+                UINT8 ink8 = *(const UINT8 *)ink_;
+                UINT8 *out = imOut->image8[y + dy] + dx;
+                for (x = 0; x < xsize; x++) {
+                    if (*mask++) {
+                        out[x] = ink8;
+                    }
+                }
             }
         }
 
     } else {
+        INT32 ink32 = 0L;
+        memcpy(&ink32, ink_, pixelsize);
         for (y = 0; y < ysize; y++) {
             INT32 *out = imOut->image32[y + dy] + dx;
             UINT8 *mask = imMask->image8[y + sy] + sx;
@@ -461,6 +486,13 @@ fill_mask_L(
 
     if (imOut->image8) {
         int i16 = isModeI16(imOut->mode);
+        int bigendian_ink =
+            i16 &&
+            (imOut->mode == IMAGING_MODE_I_16B
+#ifdef WORDS_BIGENDIAN
+             || imOut->mode == IMAGING_MODE_I_16N
+#endif
+            );
         for (y = 0; y < ysize; y++) {
             UINT8 *out = imOut->image8[y + dy] + dx;
             if (i16) {
@@ -468,10 +500,12 @@ fill_mask_L(
             }
             UINT8 *mask = imMask->image8[y + sy] + sx;
             for (x = 0; x < xsize; x++) {
-                *out = BLEND(*mask, *out, ink[0], tmp1);
+                UINT8 ink0 = bigendian_ink ? ink[1] : ink[0];
+                *out = BLEND(*mask, *out, ink0, tmp1);
                 if (i16) {
+                    UINT8 ink1 = bigendian_ink ? ink[0] : ink[1];
                     out++;
-                    *out = BLEND(*mask, *out, ink[1], tmp1);
+                    *out = BLEND(*mask, *out, ink1, tmp1);
                 }
                 out++, mask++;
             }
