@@ -429,7 +429,7 @@ getlist(PyObject *arg, Py_ssize_t *length, const char *wrong_length, int type) {
        - caller is responsible for freeing the memory
     */
 
-    Py_ssize_t i, n;
+    Py_ssize_t i, n, reported;
     int itemp;
     double dtemp;
     FLOAT32 ftemp;
@@ -442,8 +442,25 @@ getlist(PyObject *arg, Py_ssize_t *length, const char *wrong_length, int type) {
         return NULL;
     }
 
-    n = PySequence_Size(arg);
+    reported = PySequence_Size(arg);
+    if (reported < 0) {
+        return NULL;
+    }
+    if (length && wrong_length && reported != *length) {
+        PyErr_SetString(PyExc_ValueError, wrong_length);
+        return NULL;
+    }
+
+    seq = PySequence_Fast(arg, must_be_sequence);
+    if (!seq) {
+        return NULL;
+    }
+
+    /* Use the number of items actually materialized by PySequence_Fast().
+       A custom sequence can report a larger __len__ than it provides. */
+    n = PySequence_Fast_GET_SIZE(seq);
     if (length && wrong_length && n != *length) {
+        Py_DECREF(seq);
         PyErr_SetString(PyExc_ValueError, wrong_length);
         return NULL;
     }
@@ -452,17 +469,20 @@ getlist(PyObject *arg, Py_ssize_t *length, const char *wrong_length, int type) {
        calloc checks for overflow */
     list = calloc(n, type & 0xff);
     if (!list) {
+        Py_DECREF(seq);
         return ImagingError_MemoryError();
-    }
-
-    seq = PySequence_Fast(arg, must_be_sequence);
-    if (!seq) {
-        free(list);
-        return NULL;
     }
 
     for (i = 0; i < n; i++) {
         op = PySequence_Fast_GET_ITEM(seq, i);
+        if (!op) {
+            Py_DECREF(seq);
+            free(list);
+            if (!PyErr_Occurred()) {
+                PyErr_SetString(PyExc_IndexError, "sequence index out of range");
+            }
+            return NULL;
+        }
         // DRY, branch prediction is going to work _really_ well
         // on this switch. And 3 fewer loops to copy/paste.
         switch (type) {
@@ -1123,6 +1143,8 @@ _expand_image(ImagingObject *self, PyObject *args) {
 
 static PyObject *
 _filter(ImagingObject *self, PyObject *args) {
+    static const char *wrong_length = "bad kernel size";
+
     PyObject *imOut;
     Py_ssize_t kernelsize;
     FLOAT32 *kerneldata;
@@ -1137,13 +1159,10 @@ _filter(ImagingObject *self, PyObject *args) {
     }
 
     /* get user-defined kernel */
-    kerneldata = getlist(kernel, &kernelsize, NULL, TYPE_FLOAT32);
+    kernelsize = (Py_ssize_t)xsize * (Py_ssize_t)ysize;
+    kerneldata = getlist(kernel, &kernelsize, wrong_length, TYPE_FLOAT32);
     if (!kerneldata) {
         return NULL;
-    }
-    if (kernelsize != (Py_ssize_t)xsize * (Py_ssize_t)ysize) {
-        free(kerneldata);
-        return ImagingError_ValueError("bad kernel size");
     }
 
     for (i = 0; i < kernelsize; ++i) {
@@ -1607,7 +1626,7 @@ static PyObject *
 _putdata(ImagingObject *self, PyObject *args) {
     Imaging image;
     // i & n are # pixels, require py_ssize_t. x can be as large as n. y, just because.
-    Py_ssize_t n, i, x, y;
+    Py_ssize_t n, i, x, y, npixels;
 
     PyObject *data;
     PyObject *seq = NULL;
@@ -1625,25 +1644,54 @@ _putdata(ImagingObject *self, PyObject *args) {
     }
 
     image = self->image;
+    npixels = (Py_ssize_t)image->xsize * (Py_ssize_t)image->ysize;
 
-    n = PyObject_Length(data);
-    if (n > (Py_ssize_t)image->xsize * (Py_ssize_t)image->ysize) {
+    if (image->image8 && PyBytes_Check(data)) {
+        n = PyBytes_GET_SIZE(data);
+    } else {
+        Py_ssize_t reported;
+
+        reported = PySequence_Size(data);
+        if (reported < 0) {
+            return NULL;
+        }
+        if (reported > npixels) {
+            PyErr_SetString(PyExc_TypeError, "too many data entries");
+            return NULL;
+        }
+
+        seq = PySequence_Fast(data, must_be_sequence);
+        if (!seq) {
+            return NULL;
+        }
+        n = PySequence_Fast_GET_SIZE(seq);
+    }
+
+    if (n > npixels) {
+        Py_XDECREF(seq);
         PyErr_SetString(PyExc_TypeError, "too many data entries");
         return NULL;
     }
 
-#define set_value_to_item(seq, i)                                       \
-    op = PySequence_Fast_GET_ITEM(seq, i);                              \
-    if (PySequence_Check(op)) {                                         \
-        Py_DECREF(seq);                                                 \
-        PyErr_SetString(PyExc_TypeError, "sequence must be flattened"); \
-        return NULL;                                                    \
-    } else {                                                            \
-        value = PyFloat_AsDouble(op);                                   \
-        if (value == -1.0 && PyErr_Occurred()) {                        \
-            Py_DECREF(seq);                                             \
-            return NULL;                                                \
-        }                                                               \
+#define set_value_to_item(seq, i)                                             \
+    op = PySequence_Fast_GET_ITEM(seq, i);                                    \
+    if (!op) {                                                                \
+        Py_DECREF(seq);                                                       \
+        if (!PyErr_Occurred()) {                                              \
+            PyErr_SetString(PyExc_IndexError, "sequence index out of range"); \
+        }                                                                     \
+        return NULL;                                                          \
+    }                                                                         \
+    if (PySequence_Check(op)) {                                               \
+        Py_DECREF(seq);                                                       \
+        PyErr_SetString(PyExc_TypeError, "sequence must be flattened");       \
+        return NULL;                                                          \
+    } else {                                                                  \
+        value = PyFloat_AsDouble(op);                                         \
+        if (value == -1.0 && PyErr_Occurred()) {                              \
+            Py_DECREF(seq);                                                   \
+            return NULL;                                                      \
+        }                                                                     \
     }
     if (image->image8) {
         if (PyBytes_Check(data)) {
@@ -1668,10 +1716,6 @@ _putdata(ImagingObject *self, PyObject *args) {
                 }
             }
         } else {
-            seq = PySequence_Fast(data, must_be_sequence);
-            if (!seq) {
-                return NULL;
-            }
             double value;
             int bigendian = 0;
             if (image->type == IMAGING_TYPE_I16) {
@@ -1705,10 +1749,6 @@ _putdata(ImagingObject *self, PyObject *args) {
         }
     } else {
         /* 32-bit images */
-        seq = PySequence_Fast(data, must_be_sequence);
-        if (!seq) {
-            return NULL;
-        }
         switch (image->type) {
             case IMAGING_TYPE_INT32:
                 for (i = x = y = 0; i < n; i++) {
@@ -1741,7 +1781,16 @@ _putdata(ImagingObject *self, PyObject *args) {
                     u.inkint = 0;
 
                     op = PySequence_Fast_GET_ITEM(seq, i);
-                    if (!op || !getink(op, image, u.ink)) {
+                    if (!op) {
+                        Py_DECREF(seq);
+                        if (!PyErr_Occurred()) {
+                            PyErr_SetString(
+                                PyExc_IndexError, "sequence index out of range"
+                            );
+                        }
+                        return NULL;
+                    }
+                    if (!getink(op, image, u.ink)) {
                         Py_DECREF(seq);
                         return NULL;
                     }
