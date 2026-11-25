@@ -140,6 +140,88 @@ def test_rotate_with_fill() -> None:
     assert_image_equal_tofile(im, "Tests/images/rotate_45_with_fill.png")
 
 
+def palette_image(mode: str) -> Image.Image:
+    im = Image.new("P", (4, 4))
+    im.putpalette(
+        [band for index in range(16) for band in (index * 10, index * 12, index * 14)]
+    )
+    im.putdata(list(range(16)))
+    if mode == "PA":
+        im = im.convert("PA")
+    return im
+
+
+@pytest.mark.parametrize("mode", ("P", "PA"))
+@pytest.mark.parametrize("fillcolor", ("red", (255, 0, 0), (255, 0, 0, 255)))
+def test_rotate_with_fill_palette(mode: str, fillcolor: str | tuple[int, ...]) -> None:
+    im = palette_image(mode)
+    original_palette = im.getpalette()
+
+    out = im.rotate(45, expand=True, fillcolor=fillcolor)
+
+    # The new area is filled with the color from the palette.
+    expected = Image.new("RGBA", (1, 1), "red").getpixel((0, 0))
+    assert out.convert("RGBA").getpixel((0, 0)) == expected
+    assert out.convert("RGBA").getpixel((out.width - 1, 0)) == expected
+    assert out.convert("RGBA").getpixel((0, out.height - 1)) == expected
+
+    # The fill color can be read back from the palette index.
+    index = out.getpixel((0, 0))
+    if mode == "PA":
+        assert isinstance(index, tuple)
+        index = index[0]
+    assert out.getpalette()[index * 3 : index * 3 + 3] == [255, 0, 0]
+
+    # Existing pixels and the original palette are unchanged.
+    assert im.getpalette() == original_palette
+    assert out.convert("RGBA").getpixel((out.width // 2, out.height // 2)) == (
+        im.convert("RGBA").getpixel((im.width // 2, im.height // 2))
+    )
+
+
+@pytest.mark.parametrize("mode", ("P", "PA"))
+def test_rotate_with_fill_palette_alpha(mode: str) -> None:
+    im = palette_image(mode)
+
+    # A three-tuple is opaque, as for RGB and RGBA images.
+    assert im.rotate(45, expand=True, fillcolor=(255, 0, 0)).convert("RGBA").getpixel(
+        (0, 0)
+    ) == (255, 0, 0, 255)
+
+    if mode == "PA":
+        # A four-tuple controls the alpha value of a PA image.
+        out = im.rotate(45, expand=True, fillcolor=(255, 0, 0, 64))
+        assert out.getpixel((0, 0))[1] == 64
+        assert out.convert("RGBA").getpixel((0, 0)) == (255, 0, 0, 64)
+    else:
+        # Without an alpha channel in the palette, non-opaque colors are
+        # rejected, as with Image.new() and putpixel().
+        with pytest.raises(
+            ValueError, match="cannot add non-opaque RGBA color to RGB palette"
+        ):
+            im.rotate(45, expand=True, fillcolor=(255, 0, 0, 64))
+
+
+@pytest.mark.parametrize("mode", ("P", "PA"))
+def test_rotate_without_fill_palette(mode: str) -> None:
+    # Without a fill color, the original palette is copied and used.
+    im = palette_image(mode)
+    out = im.rotate(45)
+
+    assert im.palette is not None
+    assert out.palette is not None
+    assert out.palette.palette == im.palette.palette
+
+
+def test_rotate_palette_index_fill() -> None:
+    # A single integer is a palette index, not an RGB value.
+    im = palette_image("P")
+    out = im.rotate(45, expand=True, fillcolor=2)
+
+    assert out.getpixel((0, 0)) == 2
+    assert out.convert("RGB").getpixel((0, 0)) == (20, 24, 28)
+
+
 def test_alpha_rotate_no_fill() -> None:
     # Alpha images are handled differently internally
     im = Image.new("RGBA", (10, 10), "green")

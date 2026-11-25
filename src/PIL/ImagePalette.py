@@ -151,8 +151,9 @@ class ImagePalette:
                 index += 1
         if index >= 256:
             if image:
-                # Search for an unused index
-                for i, count in reversed(list(enumerate(image.histogram()))):
+                # Search for an unused index. The histogram of a PA image has an
+                # entry for each band, so only consider the palette indices.
+                for i, count in reversed(list(enumerate(image.histogram()[:256]))):
                     if count == 0 and i not in special_colors:
                         index = i
                         break

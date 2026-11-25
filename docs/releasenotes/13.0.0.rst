@@ -286,3 +286,18 @@ FriBiDi itself is not included in Pillow's wheels.
 
 The shim's source files now include SPDX license identifiers, and the SBOM has been
 corrected.
+
+Fixed fillcolor for P and PA images in rotate() and transform()
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When :py:meth:`~PIL.Image.Image.rotate` or :py:meth:`~PIL.Image.Image.transform` was
+given a ``fillcolor`` for a ``P`` or ``PA`` image, the area outside the transform was
+filled with palette index zero, rather than the requested color. For ``PA`` images,
+an RGB or RGBA ``fillcolor`` raised a :py:exc:`TypeError`.
+
+An RGB or RGBA ``fillcolor`` is now added to a copy of the image's palette, so that
+the new area uses a color that can be read back from the palette. For ``PA`` images,
+the alpha value of the ``fillcolor`` is used, just as for ``RGBA`` images; an RGB
+``fillcolor`` is fully opaque. This applies to :py:meth:`~PIL.Image.Image.rotate` and
+to the affine, perspective, quad and mesh methods of
+:py:meth:`~PIL.Image.Image.transform`. The image's own palette is left unchanged.

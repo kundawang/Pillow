@@ -2511,6 +2511,8 @@ class Image:
            the upper left corner.  Default is the center of the image.
         :param translate: An optional post-rotate translation (a 2-tuple).
         :param fillcolor: An optional color for area outside the rotated image.
+           For "P" and "PA" images, an RGB or RGBA value is added to a copy of
+           the image's palette.
         :returns: An :py:class:`~PIL.Image.Image` object.
         """
 
@@ -2983,7 +2985,8 @@ class Image:
           :py:class:`~PIL.Image.ImageTransformHandler` object, this is one of
           the arguments passed to it. Otherwise, it is unused.
         :param fillcolor: Optional fill color for the area outside the
-           transform in the output image.
+           transform in the output image. For "P" and "PA" images, an RGB or
+           RGBA value is added to a copy of the image's palette.
         :returns: An :py:class:`~PIL.Image.Image` object.
         """
 
@@ -3005,9 +3008,37 @@ class Image:
             msg = "missing method data"
             raise ValueError(msg)
 
+        palette = None
+        if self.mode in ("P", "PA"):
+            # Loading the image ensures that any raw palette data has been
+            # decoded, so that a copy can be used to look up a fill color.
+            self.load()
+            if isinstance(fillcolor, str):
+                from . import ImageColor
+
+                fillcolor = ImageColor.getcolor(fillcolor, self.mode)
+            if (
+                isinstance(fillcolor, (list, tuple))
+                and len(fillcolor) in (3, 4)
+                and all(isinstance(band, int) for band in fillcolor)
+            ):
+                # An RGB or RGBA value, rather than a palette index
+                color = cast("tuple[int, ...]", tuple(fillcolor))
+                if self.palette:
+                    palette = self.palette.copy()
+                else:
+                    from . import ImagePalette
+
+                    palette = ImagePalette.ImagePalette()
+                if self.mode == "PA":
+                    alpha = color[3] if len(color) == 4 else 255
+                    fillcolor = (palette.getcolor(color[:3], self), alpha)
+                else:
+                    fillcolor = palette.getcolor(color, self)
+            elif self.palette:
+                palette = self.palette.copy()
+
         im = new(self.mode, size, fillcolor)
-        if self.mode in ("P", "PA") and self.palette:
-            im.palette = self.palette.copy()
         im.info = self._copy_info()
         if method == Transform.MESH:
             # list of quads
@@ -3019,6 +3050,10 @@ class Image:
             im.__transformer(
                 (0, 0, *size), self, method, data, resample, fillcolor is None
             )
+        if palette is not None:
+            # Assign the palette after transforming, since otherwise the
+            # transformation would overwrite it with the input image's palette.
+            im.palette = palette
 
         return im
 

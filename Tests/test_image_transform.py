@@ -108,6 +108,134 @@ class TestImageTransform:
         )
         assert transformed.getpixel((w - 1, h - 1)) == expected_pixel
 
+    @pytest.mark.parametrize("mode", ("P", "PA"))
+    @pytest.mark.parametrize("fillcolor", ("red", (255, 0, 0), (255, 0, 0, 255)))
+    def test_fill_palette(self, mode: str, fillcolor: str | tuple[int, ...]) -> None:
+        im = hopper(mode)
+        w, h = im.size
+        transformed = im.transform(
+            im.size,
+            Image.Transform.EXTENT,
+            (0, 0, w * 2, h * 2),
+            Image.Resampling.NEAREST,
+            fillcolor=fillcolor,
+        )
+
+        # The new area is filled with the color from the palette.
+        corner = transformed.convert("RGBA").getpixel((w - 1, h - 1))
+        assert corner == (255, 0, 0, 255)
+
+        # The fill color can be read back from the palette index.
+        index = transformed.getpixel((w - 1, h - 1))
+        if mode == "PA":
+            index = index[0]
+        assert transformed.getpalette()[index * 3 : index * 3 + 3] == [255, 0, 0]
+
+        # The original image's palette is unchanged.
+        original_palette = hopper(mode).getpalette()
+        assert im.getpalette() == original_palette
+
+    @pytest.mark.parametrize("mode", ("P", "PA"))
+    def test_fill_palette_methods(self, mode: str) -> None:
+        im = hopper(mode)
+        w, h = im.size
+
+        for method, data, point in (
+            (Image.Transform.AFFINE, (1, 0, -5, 0, 1, -5), (0, 0)),
+            (Image.Transform.PERSPECTIVE, (1, 0, -5, 0, 1, -5, 0, 0), (0, 0)),
+            (
+                Image.Transform.QUAD,
+                (2, 2, 2, h + 2, w + 2, h + 2, w + 2, 2),
+                (w - 1, h - 1),
+            ),
+        ):
+            transformed = im.transform(
+                im.size,
+                method,
+                data,
+                Image.Resampling.NEAREST,
+                fillcolor=(255, 0, 0),
+            )
+            assert transformed.convert("RGBA").getpixel(point) == (
+                255,
+                0,
+                0,
+                255,
+            ), method
+
+    @pytest.mark.parametrize("mode", ("P", "PA"))
+    def test_fill_palette_mesh(self, mode: str) -> None:
+        im = hopper(mode)
+        w, h = im.size
+        transformed = im.transform(
+            im.size,
+            Image.Transform.MESH,
+            (
+                # Only the upper left quadrant is mapped, so the rest is filled
+                ((0, 0, w // 2, h // 2), (0, 0, 0, h, w, h, w, 0)),
+            ),
+            Image.Resampling.NEAREST,
+            fillcolor=(255, 0, 0),
+        )
+        assert transformed.convert("RGBA").getpixel((w - 1, h - 1)) == (
+            255,
+            0,
+            0,
+            255,
+        )
+
+    @pytest.mark.parametrize("mode", ("P", "PA"))
+    def test_fill_palette_alpha(self, mode: str) -> None:
+        im = hopper(mode)
+        w, h = im.size
+
+        if mode == "PA":
+            transformed = im.transform(
+                im.size,
+                Image.Transform.EXTENT,
+                (0, 0, w * 2, h * 2),
+                Image.Resampling.NEAREST,
+                fillcolor=(255, 0, 0, 64),
+            )
+            assert transformed.convert("RGBA").getpixel((w - 1, h - 1)) == (
+                255,
+                0,
+                0,
+                64,
+            )
+
+        # The palette is copied when no fill is given.
+        transformed = im.transform(im.size, Image.Transform.AFFINE, (1, 0, 0, 0, 1, 0))
+        assert im.palette is not None
+        assert transformed.palette is not None
+        assert transformed.palette.palette == im.palette.palette
+
+    @pytest.mark.parametrize("mode", ("P", "PA"))
+    def test_palette_unchanged_by_fill(self, mode: str) -> None:
+        im = hopper(mode)
+        w, h = im.size
+        assert im.palette is not None
+        original_palette = im.palette.palette[:]
+
+        transformed = im.transform(
+            im.size,
+            Image.Transform.AFFINE,
+            (1, 0, -5, 0, 1, -5),
+            Image.Resampling.NEAREST,
+            fillcolor=(255, 0, 0),
+        )
+
+        # The original image and its palette are not modified.
+        assert im.getpixel((w // 2, h // 2)) == hopper(mode).getpixel((w // 2, h // 2))
+        assert im.palette.palette == original_palette
+
+        # Pixels that map inside the source image are copied unchanged.
+        for x, y in ((0, 0), (w // 2, h // 2), (w - 6, h - 6)):
+            assert transformed.getpixel((x + 5, y + 5)) == im.getpixel((x, y))
+
+        # The filled area uses the new palette entry.
+        assert transformed.convert("RGBA").getpixel((0, 0)) == (255, 0, 0, 255)
+
     def test_mesh(self) -> None:
         # this should be a checkerboard of halfsized hoppers in ul, lr
         im = hopper("RGBA")
