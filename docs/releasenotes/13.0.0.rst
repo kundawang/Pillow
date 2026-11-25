@@ -294,3 +294,13 @@ FriBiDi itself is not included in Pillow's wheels.
 
 The shim's source files now include SPDX license identifiers, and the SBOM has been
 corrected.
+
+Fixed bit-plane ``P;2L`` and ``P;4L`` row geometry
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The ``P;2L`` and ``P;4L`` raw modes store each bit plane as a separate, byte-padded
+run per line. The raw, hex and PackBits decoders instead used the packed-pixel line
+size, so images whose width was not a whole number of bytes (such as 9 or 17 pixels)
+could read the padding at the end of one line as the start of the next line, or
+misread truncated input. These decoders now use the per-plane line span consistently,
+and truncated data raises an error instead of being read past the end of the buffer.

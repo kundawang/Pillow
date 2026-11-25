@@ -711,6 +711,22 @@ ImagingFindUnpacker(ModeID mode, RawModeID rawmode, int *bits_out);
 extern ImagingShuffler
 ImagingFindPacker(ModeID mode, RawModeID rawmode, int *bits_out);
 
+/*
+ * Number of bytes occupied by one line in the input stream.
+ *
+ * For bit-plane raw modes (P;2L, P;4L), each of the "bit_planes" planes
+ * stores one bit per pixel in a separate, byte-padded run, so a line takes
+ * bit_planes * ceil(xsize / 8) bytes rather than the packed
+ * ceil(bits * xsize / 8).
+ */
+static inline int
+ImagingLineBytes(int xsize, int bits, int bit_planes) {
+    if (bit_planes > 0) {
+        return bit_planes * ((xsize + 7) / 8);
+    }
+    return (bits * xsize + 7) / 8;
+}
+
 struct ImagingCodecStateInstance {
     int count;
     int state;
@@ -720,6 +736,7 @@ struct ImagingCodecStateInstance {
     int xsize, ysize, xoff, yoff;
     ImagingShuffler shuffle;
     int bits, bytes;
+    int bit_planes; /* Number of separate bit planes per line (P;2L, P;4L) */
     UINT8 *buffer;
     void *context;
     PyObject *fd;

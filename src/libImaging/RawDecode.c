@@ -28,7 +28,7 @@ ImagingRawDecode(Imaging im, ImagingCodecState state, UINT8 *buf, Py_ssize_t byt
         /* Initialize context variables */
 
         /* get size of image data and padding */
-        state->bytes = (state->xsize * state->bits + 7) / 8;
+        state->bytes = ImagingLineBytes(state->xsize, state->bits, state->bit_planes);
         if (rawstate->stride) {
             rawstate->skip = rawstate->stride - state->bytes;
             if (rawstate->skip < 0) {

@@ -226,7 +226,8 @@ _setimage(ImagingDecoderObject *decoder, PyObject *args) {
             if (state->xsize > ((INT_MAX / state->bits) - 7)) {
                 return ImagingError_MemoryError();
             }
-            state->bytes = (state->bits * state->xsize + 7) / 8;
+            state->bytes =
+                ImagingLineBytes(state->xsize, state->bits, state->bit_planes);
         }
         /* malloc check ok, overflow checked above */
         state->buffer = (UINT8 *)calloc(1, state->bytes);
@@ -309,6 +310,12 @@ get_unpacker(
 
     decoder->state.shuffle = unpack;
     decoder->state.bits = bits;
+
+    /* Bit-plane raw modes store each plane as a separate, byte-padded run
+       per line, so their line geometry differs from packed pixel data. */
+    if (rawmode == IMAGING_RAWMODE_P_2L || rawmode == IMAGING_RAWMODE_P_4L) {
+        decoder->state.bit_planes = bits;
+    }
 
     return 0;
 }

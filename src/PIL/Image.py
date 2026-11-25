@@ -951,9 +951,17 @@ class Image:
             # may pass tuple instead of argument list
             decoder_args = decoder_args[0]
 
-        if decoder_args and decoder_args[0] in {"P;2L", "P;4L"}:
-            multiple = 4 if decoder_args[0] == "P;2L" else 8
-            if len(data) % multiple:
+        if (
+            decoder_name == "raw"
+            and decoder_args
+            and decoder_args[0] in {"P;2L", "P;4L"}
+        ):
+            # Bit-plane raw modes store each plane as a separate,
+            # byte-padded run per line. Check against that geometry so
+            # truncated input is rejected before the C decoder runs.
+            planes = 2 if decoder_args[0] == "P;2L" else 4
+            line_size = planes * ((self.width + 7) // 8)
+            if len(data) < line_size * self.height:
                 msg = "not enough image data"
                 raise ValueError(msg)
 

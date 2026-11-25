@@ -219,3 +219,31 @@ def test_truncated(data_len: int, rawmode: str) -> None:
     data = b"\x00" * data_len
     with pytest.raises(ValueError, match="not enough image data"):
         Image.frombuffer("P", (9, 1), data, "raw", rawmode, 0, 1)
+
+
+@pytest.mark.parametrize(
+    "rawmode, planes",
+    (
+        ("P;2L", 2),
+        ("P;4L", 4),
+    ),
+)
+@pytest.mark.parametrize("width", (8, 9, 17))
+def test_truncated_bit_planes(rawmode: str, planes: int, width: int) -> None:
+    line_size = planes * ((width + 7) // 8)
+    height = 2
+    total = line_size * height
+    # Every prefix shorter than the bit-plane geometry is truncated.
+    for data_len in (0, line_size - 1, line_size, total - 1):
+        with pytest.raises(ValueError, match="not enough image data"):
+            Image.frombuffer(
+                "P",
+                (width, height),
+                b"\x00" * data_len,
+                "raw",
+                rawmode,
+                0,
+                1,
+            )
+    # The exact geometric length is accepted.
+    Image.frombuffer("P", (width, height), b"\x00" * total, "raw", rawmode, 0, 1)
