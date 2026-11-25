@@ -234,6 +234,65 @@ def test_save_append_images(tmp_path: Path) -> None:
         assert_image_equal(reread, provided_im)
 
 
+def test_save_append_images_larger_than_base(tmp_path: Path) -> None:
+    # An appended image should be used even when it is larger than the base image
+    im = Image.new("RGBA", (16, 16), (255, 0, 0))
+    provided_im = Image.new("RGBA", (128, 128), (0, 0, 255))
+    outfile = tmp_path / "temp.ico"
+    im.save(outfile, sizes=[(16, 16), (128, 128)], append_images=[provided_im])
+
+    with Image.open(outfile) as reread:
+        assert reread.info["sizes"] == {(16, 16), (128, 128)}
+
+        assert reread.getpixel((0, 0)) == (0, 0, 255, 255)
+
+        reread.size = (16, 16)
+        assert reread.getpixel((0, 0)) == (255, 0, 0, 255)
+
+
+def test_save_scales_down_smallest_sufficient_image(tmp_path: Path) -> None:
+    # Without an exact match, the smallest image that contains the size
+    # should be scaled down, rather than a smaller image being scaled up
+    im = Image.new("RGBA", (128, 128), (0, 0, 255))
+    appended = [Image.new("RGBA", (16, 16), (255, 0, 0)),
+                Image.new("RGBA", (64, 64), (0, 255, 0))]
+    outfile = tmp_path / "temp.ico"
+    im.save(outfile, sizes=[(32, 32)], append_images=appended)
+
+    with Image.open(outfile) as reread:
+        assert reread.info["sizes"] == {(32, 32)}
+        r, g, b, a = reread.getpixel((16, 16))
+        assert g > 200 and r < 60 and b < 60
+
+    # The order of the appended images should not affect the choice
+    outfile = tmp_path / "temp_reversed.ico"
+    im.save(outfile, sizes=[(32, 32)], append_images=appended[::-1])
+
+    with Image.open(outfile) as reread:
+        r, g, b, a = reread.getpixel((16, 16))
+        assert g > 200 and r < 60 and b < 60
+
+
+def test_save_skips_unsatisfiable_sizes(tmp_path: Path) -> None:
+    # Sizes that no image can satisfy (without scaling up),
+    # that exceed 256, or that are not positive should be skipped
+    im = Image.new("RGBA", (16, 16), (255, 0, 0))
+    outfile = tmp_path / "temp.ico"
+    im.save(outfile, sizes=[(16, 16), (64, 64), (512, 512), (0, 0)])
+
+    with Image.open(outfile) as reread:
+        assert reread.info["sizes"] == {(16, 16)}
+
+
+def test_save_invalid_mode() -> None:
+    im = Image.new("CMYK", (16, 16))
+    with pytest.raises(ValueError):
+        im.save(io.BytesIO(), "ico", sizes=[(16, 16)])
+
+    with pytest.raises(ValueError):
+        im.save(io.BytesIO(), "ico", bitmap_format="bmp", sizes=[(16, 16)])
+
+
 def test_unexpected_size() -> None:
     # This image has been manually hexedited to state that it is 16x32
     # while the image within is still 16x16

@@ -67,33 +67,44 @@ def _save(im: Image.Image, fp: IO[bytes], filename: str | bytes) -> None:
     )
     frames = []
     provided_ims = [im] + im.encoderinfo.get("append_images", [])
-    width, height = im.size
+    for provided_im in provided_ims:
+        supported_modes = (
+            BmpImagePlugin.SAVE if bmp else PngImagePlugin._OUTMODES
+        )
+        if provided_im.mode not in supported_modes:
+            msg = f"Unable to save {provided_im.mode} mode image as ICO"
+            raise ValueError(msg)
     for size in sorted(set(sizes)):
-        if size[0] > width or size[1] > height or size[0] > 256 or size[1] > 256:
+        if size[0] < 1 or size[1] < 1 or size[0] > 256 or size[1] > 256:
             continue
 
-        for provided_im in provided_ims:
-            if provided_im.size != size:
-                continue
-            frames.append(provided_im)
+        # Prefer an image that already has the requested size
+        exact_matches = [p for p in provided_ims if p.size == size]
+        if exact_matches:
+            frames.append(exact_matches[0])
             if bmp:
-                bits = BmpImagePlugin.SAVE[provided_im.mode][1]
-                bits_used = [bits]
-                for other_im in provided_ims:
-                    if other_im.size != size:
-                        continue
+                bits_used = [BmpImagePlugin.SAVE[exact_matches[0].mode][1]]
+                for other_im in exact_matches[1:]:
                     bits = BmpImagePlugin.SAVE[other_im.mode][1]
                     if bits not in bits_used:
                         # Another image has been supplied for this size
                         # with a different bit depth
                         frames.append(other_im)
                         bits_used.append(bits)
-            break
-        else:
-            # TODO: invent a more convenient method for proportional scalings
-            frame = provided_im.copy()
-            frame.thumbnail(size, Image.Resampling.LANCZOS, reducing_gap=None)
-            frames.append(frame)
+            continue
+
+        # Otherwise, scale down the smallest image that can satisfy the size
+        sources = [
+            p
+            for p in provided_ims
+            if p.size[0] >= size[0] and p.size[1] >= size[1]
+        ]
+        if not sources:
+            continue
+        # TODO: invent a more convenient method for proportional scalings
+        frame = min(sources, key=lambda p: p.size[0] * p.size[1]).copy()
+        frame.thumbnail(size, Image.Resampling.LANCZOS, reducing_gap=None)
+        frames.append(frame)
     fp.write(o16(len(frames)))  # idCount(2)
     offset = fp.tell() + len(frames) * 16
     for frame in frames:
