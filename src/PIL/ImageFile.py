@@ -505,12 +505,41 @@ class StubImageFile(ImageFile):
         if self._handler is None:
             msg = f"cannot find loader for this {self.format} file"
             raise OSError(msg)
-        image = self._handler.load(self)
-        assert image is not None
+
+        # The instance dictionary is replaced below when this stub becomes
+        # the image returned by the handler.  Keep the ownership information
+        # and file pointer here so that an exclusively owned file is still
+        # closed after a successful load or a handler error.
+        fp = self.fp
+        close_fp = self._exclusive_fp and self._close_exclusive_fp_after_loading
+        try:
+            image = self._handler.load(self)
+            assert image is not None
+
+            # Load before replacing this stub's dictionary.  A handler may
+            # return a lazily loaded image backed by either the file pointer
+            # or this stub itself, so keep both available until loading ends.
+            pixel_access = image.load()
+        finally:
+            if close_fp and fp is not None:
+                if not getattr(fp, "closed", False):
+                    fp.close()
+                if self.fp is fp:
+                    self.fp = None
+
         # become the other object (!)
         self.__class__ = image.__class__  # type: ignore[assignment]
         self.__dict__ = image.__dict__
-        return image.load()
+
+        # The dictionary replacement can hide the fp = None assignment made
+        # during cleanup.  Preserve a distinct file pointer owned by the
+        # returned image, but detach the source pointer from the loaded image.
+        missing = object()
+        current_fp = getattr(self, "fp", missing)
+        if current_fp is missing or current_fp is fp:
+            self.fp = None
+
+        return pixel_access
 
 
 class Parser:
