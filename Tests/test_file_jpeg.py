@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import re
 import struct
+import subprocess
+import sys
 import warnings
 from io import BytesIO
 from typing import Any, cast
@@ -45,6 +47,16 @@ except ImportError:
     ElementTree = None
 
 TEST_FILE = "Tests/images/hopper.jpg"
+
+
+def _jpeg_subprocess_env() -> dict[str, str]:
+    # Point the child process at the same Pillow package as this test run.
+    env = dict(os.environ)
+    package_root = os.path.dirname(os.path.dirname(Image.__file__))
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [package_root, env.get("PYTHONPATH")])
+    )
+    return env
 
 
 @skip_unless_feature("jpg")
@@ -563,6 +575,155 @@ class TestFileJpeg:
             # Test that the error is raised if loaded a second time
             with pytest.raises(OSError):
                 im.load()
+
+    @staticmethod
+    def _soffset(data: bytes | bytearray) -> int:
+        """Offset of the SOF marker's payload in a JPEG byte stream."""
+        i = 2
+        while i + 4 <= len(data):
+            marker = data[i + 1]
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            if marker in {0xD8, 0x01} or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            length = struct.unpack_from(">H", data, i + 2)[0]
+            if 0xC0 <= marker <= 0xCF and marker not in {0xC4, 0xC8, 0xCC}:
+                return i + 4
+            i += 2 + length
+        msg = "SOF marker not found"
+        raise ValueError(msg)
+
+    def test_scanline_wider_than_tile(self) -> None:
+        # The scanline buffer is sized from the tile extents, so a JPEG
+        # whose SOF claims more width than the tile is rejected, rather
+        # than letting libjpeg write past the end of the buffer.
+        out = BytesIO()
+        Image.new("RGB", (8, 8)).save(out, "JPEG")
+        data = bytearray(out.getvalue())
+        struct.pack_into(">H", data, self._soffset(data) + 3, 64)
+
+        with Image.open(BytesIO(data)) as im:
+            assert im.size == (64, 8)
+            im.tile = [im.tile[0]._replace(extents=(0, 0, 8, 8))]
+            with pytest.raises(OSError, match="broken data stream"):
+                im.load()
+
+    def test_scanline_wider_than_tile_subprocess(self, tmp_path: Path) -> None:
+        # Run in a child process, so that a regression fails the test
+        # cleanly instead of corrupting or crashing the test runner.
+        out = BytesIO()
+        Image.new("RGB", (8, 8)).save(out, "JPEG")
+        data = bytearray(out.getvalue())
+        struct.pack_into(">H", data, self._soffset(data) + 3, 64)
+        sample = tmp_path / "wider_than_tile.jpg"
+        sample.write_bytes(data)
+
+        script = tmp_path / "decode.py"
+        script.write_text(
+            "import sys\n"
+            "from PIL import Image\n"
+            f"with Image.open({str(sample)!r}) as im:\n"
+            "    im.tile = [im.tile[0]._replace(extents=(0, 0, 8, 8))]\n"
+            "    try:\n"
+            "        im.load()\n"
+            "    except OSError as e:\n"
+            "        print(type(e).__name__, e)\n"
+            "    else:\n"
+            "        print('loaded', im.getpixel((0, 0)))\n",
+            encoding="utf-8",
+        )
+
+        process = subprocess.run(
+            [sys.executable, str(script)],
+            capture_output=True,
+            text=True,
+            env=_jpeg_subprocess_env(),
+            timeout=60,
+        )
+        assert process.returncode == 0, process.stderr
+        assert (
+            process.stdout.strip()
+            == "OSError broken data stream when reading image file"
+        )
+
+    def test_more_components_than_unpacker(self, tmp_path: Path) -> None:
+        # A four-component JPEG decoded into a three-byte-per-pixel buffer.
+        # libjpeg writes one byte per component, so the scanline would run
+        # past the end of the buffer without the geometry check.
+        out = BytesIO()
+        Image.new("CMYK", (8, 8)).save(out, "JPEG")
+        sample = tmp_path / "more_components.jpg"
+        sample.write_bytes(out.getvalue())
+
+        script = tmp_path / "decode.py"
+        script.write_text(
+            "from PIL import Image\n"
+            f"data = open({str(sample)!r}, 'rb').read()\n"
+            "image = Image.core.new('RGB', (8, 8))\n"
+            "decoder = Image._getdecoder('RGB', 'jpeg', ('YCC;P', ''))\n"
+            "decoder.setimage(image, (0, 0, 8, 8))\n"
+            "try:\n"
+            "    _, errcode = decoder.decode(data)\n"
+            "    print(Image.core.getcodecstatus(errcode) if errcode else 'clean')\n"
+            "finally:\n"
+            "    decoder.cleanup()\n",
+            encoding="utf-8",
+        )
+
+        process = subprocess.run(
+            [sys.executable, str(script)],
+            capture_output=True,
+            text=True,
+            env=_jpeg_subprocess_env(),
+            timeout=60,
+        )
+        assert process.returncode == 0, process.stderr
+        assert process.stdout.strip() == "broken data stream"
+
+    def test_normal_images_unaffected(self) -> None:
+        # Valid grayscale, RGB and CMYK JPEGs, and crops of them, still
+        # decode to the same pixels and metadata as before the scanline
+        # geometry was validated.
+        for filename, mode, corners, crop_pixel in (
+            (
+                "Tests/images/hopper.jpg",
+                "RGB",
+                ((20, 20, 70), (173, 70, 55), (131, 161, 213)),
+                (18, 19, 63),
+            ),
+            (
+                "Tests/images/hopper_gray.jpg",
+                "L",
+                (26, 99, 158),
+                24,
+            ),
+        ):
+            with Image.open(filename) as im:
+                im.load()
+                assert im.mode == mode
+                assert im.size == (128, 128)
+                assert im.info["dpi"] == (96, 96)
+                assert (
+                    im.getpixel((0, 0)),
+                    im.getpixel((64, 64)),
+                    im.getpixel((127, 127)),
+                ) == corners
+                box = (10, 7, 90, 77)
+                crop = im.crop(box)
+                assert crop.size == (80, 70)
+                assert crop.getpixel((0, 0)) == crop_pixel
+
+        with Image.open("Tests/images/pil_sample_cmyk.jpg") as im:
+            im.load()
+            assert im.mode == "CMYK"
+            assert im.size == (100, 100)
+            assert im.info["adobe"] == 100
+            assert im.info["adobe_transform"] == 2
+            assert im.info["dpi"] == (72.0, 72.0)
+            assert im.getpixel((0, 0)) == (0, 242, 230, 0)
+            assert im.crop((1, 1, 99, 99)).getpixel((0, 0)) == (0, 241, 232, 0)
 
     @mark_if_feature_version(
         pytest.mark.valgrind_known_error, "libjpeg_turbo", "2.0", reason="Known Failing"

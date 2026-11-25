@@ -4,15 +4,9 @@
 Security
 ========
 
-TODO
-^^^^
-
-TODO
-
-:cve:`YYYY-XXXXX`: TODO
-^^^^^^^^^^^^^^^^^^^^^^^
-
-TODO
+* JPEG decoder out-of-bounds write when a stream's scanlines are wider than
+  the tile, or have more components than the output buffer was sized for.
+  These streams are now rejected with ``OSError`` instead of being decoded.
 
 Backwards incompatible changes
 ==============================
