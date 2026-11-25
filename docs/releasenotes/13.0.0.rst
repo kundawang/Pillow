@@ -99,10 +99,16 @@ intended for internal use, so there is no replacement.
 API changes
 ===========
 
-TODO
-^^^^
+Unified color handling for palette images
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-TODO
+:py:func:`~PIL.Image.new`, :py:meth:`~PIL.Image.Image.putpixel` and the
+:py:mod:`~PIL.ImageDraw` methods now map color strings, RGB 3-tuples and RGBA
+4-tuples to palette indexes in the same way for both "P" and "PA" images.
+
+For "PA" images, an RGB value is treated as fully opaque, while the alpha value
+of an RGBA tuple is stored in the image's alpha band rather than the palette.
+A palette index and alpha value can still be passed as a 2-tuple.
 
 API additions
 =============

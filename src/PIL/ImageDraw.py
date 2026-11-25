@@ -83,7 +83,7 @@ class ImageDraw:
             else:
                 msg = "mode mismatch"
                 raise ValueError(msg)
-        if mode == "P":
+        if mode in ("P", "PA"):
             self.palette = im.palette
         else:
             self.palette = None
@@ -133,6 +133,13 @@ class ImageDraw:
         else:
             return self.getfont()
 
+    def _get_palette_ink(self, color: tuple[int, ...]) -> tuple[int, ...] | int:
+        if self.mode == "P":
+            # Keep the existing behaviour of mapping any tuple to an index
+            assert self.palette is not None
+            return self.palette.getcolor(color, self._image)
+        return self._image._get_palette_color(color)
+
     def _getink(
         self, ink: _Ink | None, fill: _Ink | None = None
     ) -> tuple[int | None, int | None]:
@@ -148,13 +155,13 @@ class ImageDraw:
                 if isinstance(ink, str):
                     ink = ImageColor.getcolor(ink, self.mode)
                 if self.palette and isinstance(ink, tuple):
-                    ink = self.palette.getcolor(ink, self._image)
+                    ink = self._get_palette_ink(ink)
                 result_ink = self.draw.draw_ink(ink)
             if fill is not None:
                 if isinstance(fill, str):
                     fill = ImageColor.getcolor(fill, self.mode)
                 if self.palette and isinstance(fill, tuple):
-                    fill = self.palette.getcolor(fill, self._image)
+                    fill = self._get_palette_ink(fill)
                 result_fill = self.draw.draw_ink(fill)
         return result_ink, result_fill
 

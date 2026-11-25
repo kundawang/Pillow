@@ -78,11 +78,24 @@ def test_getcolor() -> None:
     with pytest.raises(ValueError):
         palette.getcolor((1, 2, 3))
     # But not if the image is not using one of the palette entries
-    palette.getcolor((1, 2, 3), image=Image.new("P", (1, 1)))
+    for mode, color in (("P", (1, 2, 3)), ("PA", (1, 2, 4))):
+        palette.getcolor(color, image=Image.new(mode, (1, 1)))
 
     # Test unknown color specifier
     with pytest.raises(ValueError):
         palette.getcolor("unknown")  # type: ignore[arg-type]
+
+
+def test_getcolor_full_palette_pa() -> None:
+    # A full palette of 256 colors
+    palette = ImagePalette.ImagePalette("RGB", list(range(256)) * 3)
+    im = Image.new("PA", (1, 1))
+
+    # An unused index is found from the image, rather than raising an error
+    index = palette.getcolor((1, 2, 3), image=im)
+    assert index < 256
+    roundtripped_palette = ImagePalette.ImagePalette(palette=palette.palette)
+    assert roundtripped_palette.colors[(1, 2, 3)] == index
 
 
 def test_getcolor_rgba() -> None:

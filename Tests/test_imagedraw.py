@@ -86,6 +86,86 @@ def test_new_color() -> None:
         assert im.convert("RGB").getpixel((0, 0)) == (1, 0, 0)
 
 
+@pytest.mark.parametrize(
+    "fill, expected",
+    (
+        ("#00f", (0, 0, 255, 255)),
+        ((0, 0, 255), (0, 0, 255, 255)),
+        ((0, 0, 255, 128), (0, 0, 255, 128)),
+    ),
+)
+def test_pa(fill: str | tuple[int, ...], expected: tuple[int, ...]) -> None:
+    im = Image.new("PA", (2, 1))
+    draw = ImageDraw.Draw(im)
+
+    draw.point((0, 0), fill)
+    assert im.convert("RGBA").getpixel((0, 0)) == expected
+
+    # A palette index and alpha value can still be used
+    px = im.getpixel((0, 0))
+    assert isinstance(px, tuple)
+    draw.point((1, 0), (px[0], 64))
+    assert im.convert("RGBA").getpixel((1, 0)) == (*expected[:3], 64)
+
+
+@pytest.mark.parametrize("method", ("point", "line", "rectangle"))
+@pytest.mark.parametrize("mode", ("P", "PA"))
+def test_palette_colors(method: str, mode: str) -> None:
+    # Color strings, RGB and RGBA values should map to the same palette index
+    im = Image.new(mode, (2, 1))
+    draw = ImageDraw.Draw(im)
+
+    if method == "point":
+        draw.point((0, 0), fill=(0, 0, 255))
+        draw.point((1, 0), fill="#0000ff")
+    elif method == "line":
+        draw.line((0, 0, 1, 0), fill=(0, 0, 255))
+    else:
+        draw.rectangle((0, 0, 1, 0), fill=(0, 0, 255))
+
+    index = im.getpixel((0, 0))
+    if mode == "PA":
+        assert isinstance(index, tuple)
+        assert index == (0, 255)
+    else:
+        assert index == 0
+    assert im.palette is not None
+    assert im.palette.colors[(0, 0, 255)] == 0
+
+    if method == "point":
+        # The color string mapped to the same index as the RGB tuple
+        assert im.getpixel((1, 0)) == index
+    else:
+        # A color string maps to the same index
+        ImageDraw.Draw(im).point((1, 0), fill="#0000ff")
+        assert im.getpixel((1, 0)) == index
+
+
+def test_fixed_palette_colors() -> None:
+    # A fixed palette where blue is already index 2
+    palette = [255, 0, 0, 0, 255, 0, 0, 0, 255] + [0] * (768 - 9)
+    for mode in ("P", "PA"):
+        for color in ("#00f", (0, 0, 255), (0, 0, 255, 255)):
+            # Creation allocates the first entry of an empty palette
+            created = Image.new(mode, (1, 1), color)
+            assert created.palette is not None
+            assert created.palette.colors[(0, 0, 255)] == 0
+
+            # Drawing reuses the existing index in the fixed palette
+            drawn = Image.new(mode, (1, 1))
+            drawn.putpalette(palette)
+            ImageDraw.Draw(drawn).point((0, 0), fill=color)
+            assert drawn.palette is not None
+            assert drawn.palette.colors[(0, 0, 255)] == 2
+
+            index = drawn.getpixel((0, 0))
+            if mode == "PA":
+                assert index == (2, 255)
+            else:
+                assert index == 2
+            assert drawn.convert("RGBA").getpixel((0, 0)) == (0, 0, 255, 255)
+
+
 def test_mode_mismatch() -> None:
     im = hopper("RGB").copy()
 
