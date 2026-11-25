@@ -713,6 +713,7 @@ PyImaging_LibTiffEncoderNew(PyObject *self, PyObject *args) {
         return NULL;
     }
 
+    long bits_per_sample = 1;
     if (!PyList_Check(tags)) {
         PyErr_SetString(PyExc_ValueError, "Invalid tags list");
         return NULL;
@@ -729,6 +730,14 @@ PyImaging_LibTiffEncoderNew(PyObject *self, PyObject *args) {
                 Py_DECREF(item);
                 PyErr_SetString(PyExc_ValueError, "Invalid tags list");
                 return NULL;
+            }
+            if ((int)PyLong_AsLong(PyTuple_GET_ITEM(item, 0)) ==
+                TIFFTAG_BITSPERSAMPLE) {
+                PyObject *bps_value = PyTuple_GET_ITEM(item, 1);
+                if (PyTuple_Check(bps_value)) {
+                    bps_value = PyTuple_GetItem(bps_value, 0);
+                }
+                bits_per_sample = PyLong_AsLong(bps_value);
             }
             Py_DECREF(item);
         }
@@ -869,12 +878,30 @@ PyImaging_LibTiffEncoderNew(PyObject *self, PyObject *args) {
             len = PyTuple_Size(value);
 
             if (key_int == TIFFTAG_COLORMAP) {
-                int stride = 256;
-                if (len != 768) {
+                /* Each of the three planes holds 1 << BitsPerSample
+                 * entries. Use pointer-sized arithmetic so that a 16-bit
+                 * map (3 * 65536 entries) cannot overflow. Bound the shift
+                 * so that stride * 3 stays within Py_ssize_t. */
+                int max_shift = (int)sizeof(Py_ssize_t) * 8 - 2;
+                if (bits_per_sample < 0 || bits_per_sample >= max_shift) {
                     Py_DECREF(encoder);
                     Py_DECREF(item);
-                    PyErr_SetString(
-                        PyExc_ValueError, "Requiring 768 items for Colormap"
+                    PyErr_Format(
+                        PyExc_ValueError,
+                        "Invalid BitsPerSample %ld for Colormap",
+                        bits_per_sample
+                    );
+                    return NULL;
+                }
+                Py_ssize_t stride = (Py_ssize_t)1 << bits_per_sample;
+                Py_ssize_t expected = stride * 3;
+                if (len != expected) {
+                    Py_DECREF(encoder);
+                    Py_DECREF(item);
+                    PyErr_Format(
+                        PyExc_ValueError,
+                        "Requiring %lld items for Colormap",
+                        (long long)expected
                     );
                     return NULL;
                 }
