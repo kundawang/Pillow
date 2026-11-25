@@ -216,6 +216,15 @@ Fixed drawing on I;16B images
 When drawing on an ``I;16B`` image, some drawing methods wrote in the wrong byte order.
 All drawing operations now use the byte order of the image mode.
 
+Fixed resizing I;16B and I;16N images
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When resizing an ``I;16B`` or ``I;16N`` image with any filter other than nearest
+neighbor, the high and low bytes of each 16-bit pixel were read in the wrong order,
+so the output values did not correspond to the input. Resampling now interprets the
+bytes according to the image mode, and all four ``I;16`` modes produce numerically
+equivalent output for the same input data.
+
 Fixed histograms for masked LA, La and PA images
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

@@ -4,6 +4,7 @@ Tests for resize functionality.
 
 from __future__ import annotations
 
+import sys
 from itertools import permutations
 
 import pytest
@@ -65,6 +66,103 @@ class TestImagingCoreResize:
             assert r.mode == mode
             assert r.size == (15, 12)
             assert r.im.bands == im.im.bands
+
+    @pytest.mark.parametrize(
+        "resample",
+        (
+            Image.Resampling.BOX,
+            Image.Resampling.BILINEAR,
+            Image.Resampling.HAMMING,
+            Image.Resampling.BICUBIC,
+            Image.Resampling.LANCZOS,
+            Image.Resampling.MKS2013,
+            Image.Resampling.MKS2021,
+        ),
+    )
+    def test_i16_resample_endianness(self, resample: Image.Resampling) -> None:
+        # Resampling must interpret the two bytes of each pixel as a single
+        # 16-bit value, so all four I;16 modes holding the same numeric data
+        # must produce numerically identical output. Use values whose high and
+        # low bytes differ to make a byte swap obvious.
+        values = [
+            0x0000,
+            0x00FF,
+            0xFF00,
+            0xFFFF,
+            0x1234,
+            0x4321,
+            0xABCD,
+            0xDCBA,
+            0x0102,
+            0x0304,
+            0x0506,
+            0x0708,
+            0xF0F0,
+            0x0F0F,
+            0xAAAA,
+            0x5555,
+        ]
+
+        def make(mode: str) -> Image.Image:
+            if mode == "I;16B":
+                raw = b"".join(bytes((v >> 8, v & 0xFF)) for v in values)
+            elif mode == "I;16N" and sys.byteorder == "big":
+                raw = b"".join(bytes((v >> 8, v & 0xFF)) for v in values)
+            else:
+                raw = b"".join(bytes((v & 0xFF, v >> 8)) for v in values)
+            return Image.frombytes(mode, (4, 4), raw)
+
+        reference = self.resize(make("I;16L"), (7, 5), resample).get_flattened_data()
+        for mode in ("I;16", "I;16B", "I;16N"):
+            resized = self.resize(make(mode), (7, 5), resample)
+            assert resized.mode == mode
+            assert resized.size == (7, 5)
+            assert resized.get_flattened_data() == reference
+
+    def test_i16_resample_byte_order(self) -> None:
+        # The resampled output must keep each mode's on-disk byte order.
+        values = [0x1234, 0xABCD, 0x00FF, 0xFF00]
+        little_raw = b"".join(bytes((v & 0xFF, v >> 8)) for v in values)
+        big_raw = b"".join(bytes((v >> 8, v & 0xFF)) for v in values)
+        native_raw = little_raw if sys.byteorder == "little" else big_raw
+        for mode, raw in (
+            ("I;16", little_raw),
+            ("I;16L", little_raw),
+            ("I;16B", big_raw),
+            ("I;16N", native_raw),
+        ):
+            resized = self.resize(
+                Image.frombytes(mode, (2, 2), raw), (4, 4), Image.Resampling.BILINEAR
+            )
+            assert resized.mode == mode
+            # Numeric corner value is preserved by the edge weights.
+            assert resized.getpixel((0, 0)) == 0x1234
+            # And the two bytes are stored in the mode's declared order.
+            assert resized.tobytes()[0:2] == raw[0:2]
+
+    @pytest.mark.parametrize(
+        "resample",
+        (
+            Image.Resampling.BOX,
+            Image.Resampling.BILINEAR,
+            Image.Resampling.HAMMING,
+            Image.Resampling.BICUBIC,
+            Image.Resampling.LANCZOS,
+        ),
+    )
+    def test_i16_resample_extrema(self, resample: Image.Resampling) -> None:
+        # Uniform 0 and 65535 images must keep their values through resampling,
+        # and every result has to stay within the 16-bit range.
+        for value in (0, 65535):
+            for mode in ("I;16", "I;16L", "I;16B", "I;16N"):
+                im = Image.new(mode, (4, 4), value)
+                resized = self.resize(im, (7, 5), resample)
+                assert resized.mode == mode
+                assert set(resized.get_flattened_data()) == {value}, (
+                    mode,
+                    resample,
+                    value,
+                )
 
     @pytest.mark.parametrize(
         "resample",
