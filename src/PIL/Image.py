@@ -3362,7 +3362,6 @@ def frombuffer(
                 from . import ImagePalette
 
                 im.palette = ImagePalette.ImagePalette("RGB", im.im.getpalette("RGB"))
-            im.readonly = 1
             return im
 
     return frombytes(mode, size, data, decoder_name, args)

@@ -4,6 +4,15 @@
 Security
 ========
 
+Read-only image targets
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Decoders and :py:meth:`~PIL.ImageCms.ImageCmsTransform.apply` now raise
+:py:exc:`ValueError` when asked to write to read-only image memory, such as a
+buffer mapped from :py:class:`bytes` by :py:func:`~PIL.Image.frombuffer`.
+Previously, the underlying C code could bypass the Python readonly flag and
+modify the shared buffer. Writable buffers continue to be updated in place.
+
 TODO
 ^^^^
 
