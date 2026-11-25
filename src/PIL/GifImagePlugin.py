@@ -528,6 +528,9 @@ def _normalize_mode(im: Image.Image) -> Image.Image:
         im.load()
         return im
     if Image.getmodebase(im.mode) == "RGB":
+        if im.mode not in {"RGB", "RGBA"}:
+            # Of the RGB-based modes, quantization only supports RGB and RGBA
+            im = im.convert("RGBA" if im.has_transparency_data else "RGB")
         im = im.convert("P", palette=Image.Palette.ADAPTIVE)
         assert im.palette is not None
         if im.palette.mode == "RGBA":
@@ -557,12 +560,15 @@ def _normalize_palette(
     :returns: Image object
     """
     source_palette = None
+    palette_mode: str | None = None
     if palette:
         # a bytes palette
         if isinstance(palette, (bytes, bytearray, list)):
             source_palette = bytearray(palette[:768])
+            palette_mode = "RGB"
         if isinstance(palette, ImagePalette.ImagePalette):
             source_palette = bytearray(palette.palette)
+            palette_mode = palette.mode
 
     if im.mode == "P":
         if not source_palette:
@@ -576,11 +582,31 @@ def _normalize_palette(
     assert source_palette is not None
 
     if palette:
+        assert palette_mode is not None
+        palette_bands = Image.getmodebands(palette_mode)
         used_palette_colors: list[int | None] = []
         assert im.palette is not None
-        for i in range(0, len(source_palette), 3):
-            source_color = tuple(source_palette[i : i + 3])
+        for i in range(0, len(source_palette), palette_bands):
+            source_color = tuple(source_palette[i : i + palette_bands])
             index = im.palette.colors.get(source_color)
+            if index is None and len(source_color) == 3:
+                # Quantized images can have an RGBA palette even when the
+                # requested GIF palette only contains RGB colors. Prefer an
+                # opaque match, so a transparent color and an opaque color
+                # with the same RGB values can still use different indexes.
+                index = im.palette.colors.get((*source_color, 255))
+                transparency = info.get("transparency")
+                if (
+                    index is None
+                    and im.palette.mode == "RGBA"
+                    and isinstance(transparency, int)
+                    and 0 <= transparency * 4 + 2 < len(im.palette.palette)
+                    and tuple(
+                        im.palette.palette[transparency * 4 : transparency * 4 + 3]
+                    )
+                    == source_color
+                ):
+                    index = transparency
             if index in used_palette_colors:
                 index = None
             used_palette_colors.append(index)
@@ -595,6 +621,12 @@ def _normalize_palette(
             assert index is not None
             dest_map.append(index)
         im = im.remap_palette(dest_map)
+        transparency = info.get("transparency")
+        if isinstance(transparency, int):
+            try:
+                info["transparency"] = dest_map.index(transparency)
+            except ValueError:
+                del info["transparency"]
     else:
         optimized_palette_colors = _get_optimize(im, info)
         if optimized_palette_colors is not None:
@@ -610,6 +642,8 @@ def _normalize_palette(
 
     assert im.palette is not None
     im.palette.palette = source_palette
+    if palette_mode is not None:
+        im.palette.mode = palette_mode
     return im
 
 
