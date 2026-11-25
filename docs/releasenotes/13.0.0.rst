@@ -122,3 +122,13 @@ to help projects prepare for 3.15, and to ensure Pillow could be used
 immediately at the release of 3.15.0 final (2026-10-01, :pep:`790`).
 
 Pillow 13.0.0 now officially supports Python 3.15.
+
+PDF page tree parsing
+^^^^^^^^^^^^^^^^^^^^^
+
+The PDF page tree is now traversed iteratively instead of recursively. A page tree
+containing a reference cycle or a duplicated child node raises
+:py:class:`~PIL.PdfParser.PdfFormatError` with a message identifying the offending
+object, rather than failing with a recursion error or emitting the same page more
+than once. A kid that points at an object missing from the cross-reference table is
+likewise rejected instead of being treated as a valid page.

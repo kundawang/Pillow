@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import signal
+import subprocess
+import sys
 import time
 import zlib
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 
 from PIL.PdfParser import (
     IndirectObjectDef,
     IndirectReference,
+    PdfArray,
     PdfBinary,
     PdfDict,
     PdfFormatError,
@@ -158,6 +163,276 @@ def test_linearize_page_tree() -> None:
 
     with PdfParser(f=b) as pdf:
         assert pdf.linearize_page_tree() == page_ids
+
+
+def _build_pdf(
+    objects: dict[int, bytes],
+    pages_id: int = 1,
+    omit_from_xref: tuple[int, ...] = (),
+) -> bytes:
+    """Build a minimal PDF in memory. ``objects`` maps object IDs (all
+    generation 0) to their already-serialized object bodies. A Catalog
+    pointing at the given Pages object ID is appended as the last object."""
+    catalog_id = max(objects) + 1
+    objects = dict(objects)
+    objects[catalog_id] = bytes(
+        PdfDict(
+            {
+                b"Type": PdfName(b"Catalog"),
+                b"Pages": IndirectReference(pages_id, 0),
+            }
+        )
+    )
+    out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets: dict[int, int] = {}
+    for object_id in sorted(objects):
+        offsets[object_id] = len(out)
+        out += f"{object_id} 0 obj\n".encode("us-ascii")
+        out += objects[object_id]
+        out += b"\nendobj\n"
+    xref_offset = len(out)
+    max_id = max(objects)
+    out += f"xref\n0 {max_id + 1}\n".encode("us-ascii")
+    out += b"0000000000 65535 f \n"
+    for object_id in range(1, max_id + 1):
+        if object_id in omit_from_xref:
+            out += b"0000000000 65535 f \n"
+        else:
+            out += f"{offsets[object_id]:010d} 00000 n \n".encode("us-ascii")
+    catalog = PdfDict({b"Size": max_id + 1, b"Root": IndirectReference(catalog_id, 0)})
+    out += (
+        b"trailer\n"
+        + bytes(catalog)
+        + b"\nstartxref\n"
+        + str(xref_offset).encode("us-ascii")
+        + b"\n%%EOF\n"
+    )
+    return bytes(out)
+
+
+def _pages_node(kids: list[IndirectReference], count: int | None = None) -> bytes:
+    node = PdfDict(
+        {
+            b"Type": PdfName(b"Pages"),
+            b"Count": len(kids) if count is None else count,
+            b"Kids": PdfArray(kids),
+        }
+    )
+    return bytes(node)
+
+
+def _page_node(parent: IndirectReference) -> bytes:
+    return bytes(
+        PdfDict(
+            {
+                b"Type": PdfName(b"Page"),
+                b"Parent": parent,
+                b"MediaBox": PdfArray([0, 0, 10, 10]),
+            }
+        )
+    )
+
+
+class _AlarmTimeout(Exception):
+    pass
+
+
+def _alarm_handler(signum: int, frame: object) -> None:
+    raise _AlarmTimeout
+
+
+def test_page_tree_cycle() -> None:
+    # Two-level cycle: the root Pages node lists an intermediate Pages node
+    # whose Kids point back at the root.
+    root_ref = IndirectReference(1, 0)
+    inner_ref = IndirectReference(2, 0)
+    objects = {
+        1: _pages_node([inner_ref]),
+        2: _pages_node([root_ref]),
+    }
+    data = _build_pdf(objects)
+
+    signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.alarm(10)
+    try:
+        with pytest.raises(
+            PdfFormatError, match="reference cycle found at object 2 0 R"
+        ):
+            PdfParser(buf=data)
+    finally:
+        signal.alarm(0)
+
+
+def test_page_tree_self_cycle() -> None:
+    # A Pages node listing itself among its own Kids.
+    root_ref = IndirectReference(1, 0)
+    objects = {1: _pages_node([root_ref])}
+    data = _build_pdf(objects)
+
+    signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.alarm(10)
+    try:
+        with pytest.raises(
+            PdfFormatError, match="reference cycle found at object 1 0 R"
+        ):
+            PdfParser(buf=data)
+    finally:
+        signal.alarm(0)
+
+
+def test_page_tree_duplicate_kid() -> None:
+    # The same Page object is listed twice by the same parent.
+    root_ref = IndirectReference(1, 0)
+    page_ref = IndirectReference(2, 0)
+    objects = {
+        1: _pages_node([page_ref, page_ref]),
+        2: _page_node(root_ref),
+    }
+    data = _build_pdf(objects)
+
+    signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.alarm(10)
+    try:
+        with pytest.raises(
+            PdfFormatError, match="page tree node 2 0 R is referenced more than once"
+        ):
+            PdfParser(buf=data)
+    finally:
+        signal.alarm(0)
+
+
+def test_page_tree_duplicate_kid_in_different_parents() -> None:
+    # The same Pages subtree is referenced by two different parent nodes.
+    left_ref = IndirectReference(2, 0)
+    right_ref = IndirectReference(3, 0)
+    shared_ref = IndirectReference(4, 0)
+    page_ref = IndirectReference(5, 0)
+    objects = {
+        1: _pages_node([left_ref, right_ref]),
+        2: _pages_node([shared_ref]),
+        3: _pages_node([shared_ref]),
+        4: _pages_node([page_ref]),
+        5: _page_node(shared_ref),
+    }
+    data = _build_pdf(objects)
+
+    signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.alarm(10)
+    try:
+        with pytest.raises(
+            PdfFormatError, match="page tree node 4 0 R is referenced more than once"
+        ):
+            PdfParser(buf=data)
+    finally:
+        signal.alarm(0)
+
+
+def test_page_tree_missing_xref_entry() -> None:
+    # A kid references an object that is marked free in the xref table: it
+    # must not be treated as a valid page.
+    root_ref = IndirectReference(1, 0)
+    missing_ref = IndirectReference(2, 0)
+    objects = {
+        1: _pages_node([missing_ref]),
+        2: _page_node(root_ref),
+    }
+    data = _build_pdf(objects, omit_from_xref=(2,))
+
+    signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.alarm(10)
+    try:
+        with pytest.raises(PdfFormatError, match="references missing object 2 0 R"):
+            PdfParser(buf=data)
+    finally:
+        signal.alarm(0)
+
+
+def test_page_tree_nested_and_shared_resources() -> None:
+    # A legal nested page tree: DFS order and page numbering are preserved,
+    # and sharing an indirect Resources object between pages stays valid.
+    root_ref = IndirectReference(1, 0)
+    left_ref = IndirectReference(2, 0)
+    right_ref = IndirectReference(3, 0)
+    resources_ref = IndirectReference(4, 0)
+    page_refs = [IndirectReference(i, 0) for i in range(5, 9)]
+    objects = {
+        1: _pages_node([left_ref, right_ref]),
+        2: _pages_node([page_refs[0], page_refs[1]]),
+        3: _pages_node([page_refs[2], page_refs[3]]),
+        4: bytes(PdfDict({b"ProcSet": PdfArray([PdfName(b"PDF")])})),
+    }
+    for page_ref in page_refs:
+        objects[page_ref.object_id] = bytes(
+            PdfDict(
+                {
+                    b"Type": PdfName(b"Page"),
+                    b"Parent": root_ref,
+                    b"MediaBox": PdfArray([0, 0, 10, 10]),
+                    b"Resources": resources_ref,
+                }
+            )
+        )
+    data = _build_pdf(objects)
+
+    with PdfParser(buf=data) as pdf:
+        assert pdf.pages == page_refs
+        assert pdf.linearize_page_tree() == page_refs
+        for page_ref in page_refs:
+            assert pdf.read_indirect(page_ref)[b"Resources"] == resources_ref
+
+
+def test_page_tree_deep_nesting_does_not_hit_recursion_limit() -> None:
+    # A chain deeper than the default recursion limit must linearize because
+    # the traversal is iterative rather than recursive.
+    depth = sys.getrecursionlimit() + 100
+    page_ref = IndirectReference(depth + 2, 0)
+    objects: dict[int, bytes] = {}
+    for object_id in range(1, depth + 1):
+        kid_ref = IndirectReference(object_id + 1, 0)
+        objects[object_id] = _pages_node([kid_ref])
+    objects[depth + 1] = _pages_node([page_ref])
+    objects[depth + 2] = _page_node(IndirectReference(depth + 1, 0))
+    data = _build_pdf(objects)
+
+    signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.alarm(30)
+    try:
+        with PdfParser(buf=data) as pdf:
+            assert pdf.pages == [page_ref]
+    finally:
+        signal.alarm(0)
+
+
+def test_page_tree_cycle_in_subprocess() -> None:
+    # Belt and braces: even with a very low recursion limit, a cyclic page
+    # tree is rejected with PdfFormatError instead of hanging or raising
+    # RecursionError, and the process terminates quickly on its own.
+    code = (
+        "import sys\n"
+        "from PIL.PdfParser import IndirectReference, PdfFormatError, PdfParser\n"
+        "from Tests.test_pdfparser import _build_pdf, _pages_node\n"
+        "sys.setrecursionlimit(50)\n"
+        "data = _build_pdf("
+        "{1: _pages_node([IndirectReference(2, 0)]), "
+        "2: _pages_node([IndirectReference(1, 0)])})\n"
+        "try:\n"
+        "    PdfParser(buf=data)\n"
+        "except PdfFormatError as e:\n"
+        "    assert 'cycle' in str(e); print('OK')\n"
+        "else:\n"
+        "    raise AssertionError('no error raised')\n"
+    )
+    start = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert time.monotonic() - start < 30
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
 
 
 def test_duplicate_xref_entry() -> None:

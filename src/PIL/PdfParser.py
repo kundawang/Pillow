@@ -1076,17 +1076,64 @@ class PdfParser:
         return value
 
     def linearize_page_tree(
-        self, node: PdfDict | None = None
+        self,
+        node: PdfDict | None = None,
+        node_ref: IndirectReference | None = None,
     ) -> list[IndirectReference]:
-        page_node = node if node is not None else self.page_tree_root
+        page_tree_root = node if node is not None else self.page_tree_root
+        if node is None:
+            node_ref = self.pages_ref
         check_format_condition(
-            page_node[b"Type"] == b"Pages", "/Type of page tree node is not /Pages"
+            page_tree_root[b"Type"] == b"Pages", "/Type of page tree node is not /Pages"
         )
-        pages = []
-        for kid in page_node[b"Kids"]:
+        # Iterative depth-first traversal with an explicit stack, so that a
+        # reference cycle is detected here instead of relying on the Python
+        # recursion limit. Each stack frame is (node reference, kids, next kid
+        # index, references of the ancestors on the current branch).
+        pages: list[IndirectReference] = []
+        visited: set[IndirectReference] = set()
+        root_ancestors = {node_ref} if node_ref is not None else set()
+        if node_ref is not None:
+            visited.add(node_ref)
+        stack: list[
+            tuple[IndirectReference | None, PdfArray, int, set[IndirectReference]]
+        ] = [(node_ref, page_tree_root[b"Kids"], 0, root_ancestors)]
+        while stack:
+            node_ref, kids, kid_index, ancestors = stack[-1]
+            if kid_index == len(kids):
+                stack.pop()
+                continue
+            kid = kids[kid_index]
+            stack[-1] = (node_ref, kids, kid_index + 1, ancestors)
+            check_format_condition(
+                isinstance(kid, IndirectReference),
+                f"page tree node kid is not an indirect reference: {kid!r}",
+            )
+            assert isinstance(kid, IndirectReference)
+            check_format_condition(
+                kid.object_id in self.xref_table,
+                f"page tree references missing object {kid}",
+            )
+            check_format_condition(
+                kid not in ancestors,
+                f"page tree reference cycle found at object {kid}",
+            )
+            check_format_condition(
+                kid not in visited,
+                f"page tree node {kid} is referenced more than once",
+            )
+            visited.add(kid)
             kid_object = self.read_indirect(kid)
+            check_format_condition(
+                isinstance(kid_object, PdfDict) and b"Type" in kid_object,
+                f"page tree kid {kid} is not a page tree node",
+            )
             if kid_object[b"Type"] == b"Page":
                 pages.append(kid)
             else:
-                pages.extend(self.linearize_page_tree(node=kid_object))
+                check_format_condition(
+                    kid_object[b"Type"] == b"Pages",
+                    "/Type of page tree node is not /Pages",
+                )
+                stack.append((kid, kid_object[b"Kids"], 0, ancestors | {kid}))
         return pages
