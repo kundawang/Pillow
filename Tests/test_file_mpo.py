@@ -263,6 +263,41 @@ def test_n_frames() -> None:
         assert im.is_animated
 
 
+@pytest.mark.parametrize("test_file", test_files)
+def test_seek_low_budget(test_file: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Frames exactly at the pixel budget are still allowed
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 640 * 480)
+    with Image.open(test_file) as im:
+        assert im.n_frames == 2
+
+        im.seek(1)
+        assert im.tell() == 1
+        assert im.size == (640, 480)
+        im.load()
+
+        # Repeated seeks remain consistent
+        im.seek(0)
+        assert im.tell() == 0
+        im.load()
+        im.seek(1)
+        assert im.tell() == 1
+
+
+def test_seek_decompression_bomb(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Both frames are 640x480; enlarge the second frame beyond twice the budget
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 640 * 480)
+    with open("Tests/images/frozenpond.mpo", "rb") as fp:
+        data = fp.read()
+    data = data[:89957] + _binary.o16be(1024) + _binary.o16be(1024) + data[89961:]
+    with MpoImagePlugin.MpoImageFile(BytesIO(data)) as im:
+        assert im.tell() == 0
+        with pytest.raises(Image.DecompressionBombError):
+            im.seek(1)
+        # A failed seek must not update the frame state or allocate a buffer
+        assert im.tell() == 0
+        assert im._im is None
+
+
 def test_eoferror() -> None:
     with Image.open("Tests/images/sugarshack.mpo") as im:
         assert isinstance(im, MpoImagePlugin.MpoImageFile)

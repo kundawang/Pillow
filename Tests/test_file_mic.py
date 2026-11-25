@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from io import BytesIO
+
+import olefile
 import pytest
 
 from PIL import Image, ImagePalette
+from PIL._binary import o32le as o32
 
-from .helper import assert_image_similar, hopper, skip_unless_feature
+from .helper import (
+    assert_image_equal,
+    assert_image_similar,
+    hopper,
+    skip_unless_feature,
+)
 
 MicImagePlugin = pytest.importorskip(
     "PIL.MicImagePlugin", reason="olefile not installed"
@@ -53,6 +62,54 @@ def test_seek() -> None:
         with pytest.raises(EOFError):
             im.seek(99)
         assert im.tell() == 0
+
+
+def _make_two_frame_mic(im: Image.Image) -> None:
+    assert isinstance(im, MicImagePlugin.MicImageFile)
+    im._n_frames = 2
+    im.images = [im.images[0], im.images[0]]
+
+
+def test_seek_multiple_frames() -> None:
+    with Image.open(TEST_FILE) as im, Image.open(TEST_FILE) as expected:
+        _make_two_frame_mic(im)
+        assert im.n_frames == 2
+
+        im.seek(1)
+        assert im.tell() == 1
+        assert im.size == (128, 128)
+        assert_image_equal(im, expected)
+
+        # Repeated seeks remain consistent
+        im.seek(0)
+        assert im.tell() == 0
+        assert_image_equal(im, expected)
+        im.seek(1)
+        assert im.tell() == 1
+        assert_image_equal(im, expected)
+
+
+def test_seek_decompression_bomb(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The first frame is 128x128; enlarge the second frame beyond twice the budget
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 128 * 128)
+    with Image.open(TEST_FILE) as im:
+        _make_two_frame_mic(im)
+
+        assert isinstance(im, MicImagePlugin.MicImageFile)
+        with im.ole.openstream(im.images[0]) as fp:
+            tiff_data = fp.read()
+        tiff_data = tiff_data[:35132] + o32(256) + tiff_data[35136:]
+        tiff_data = tiff_data[:35144] + o32(256) + tiff_data[35148:]
+        with open(TEST_FILE, "rb") as fp:
+            b = BytesIO(fp.read())
+        im.ole = olefile.OleFileIO(b, write_mode=True)
+        im.ole.write_stream(im.images[0], tiff_data)
+
+        with pytest.raises(Image.DecompressionBombError):
+            im.seek(1)
+        # A failed seek must not update the frame state or allocate a buffer
+        assert im.tell() == 0
+        assert im._im is None
 
 
 def test_close() -> None:

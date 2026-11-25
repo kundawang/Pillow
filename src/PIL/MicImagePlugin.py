@@ -79,6 +79,13 @@ class MicImageFile(TiffImagePlugin.TiffImageFile):
 
         TiffImagePlugin.TiffImageFile._open(self)
 
+        # TiffImageFile._open() determines the frame information from the
+        # individual TIFF stream; restore the MIC container's frame count
+        self._n_frames = len(self.images)
+        self.is_animated = self._n_frames > 1
+
+        Image._decompression_bomb_check(self.size)
+
         self.frame = frame
 
     def tell(self) -> int:
