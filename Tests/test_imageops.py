@@ -11,6 +11,10 @@ from .helper import (
     hopper,
 )
 
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 
 class Deformer(ImageOps.SupportsGetMesh):
     def getmesh(
@@ -675,3 +679,224 @@ def test_autocontrast_preserve_one_color(color: tuple[int, int, int]) -> None:
         img, cutoff=10, preserve_tone=True
     )  # single color 10 cutoff
     assert_image_equal(img, out)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    (
+        ImageOps.invert,
+        lambda im: ImageOps.posterize(im, 3),
+        ImageOps.solarize,
+    ),
+)
+def test_palette_operation(operation: Callable[[Image.Image], Image.Image]) -> None:
+    im = hopper("P")
+    result = operation(im)
+
+    assert result.mode == "P"
+    assert_image_equal(result.convert("RGB"), operation(im.convert("RGB")))
+
+
+def test_palette_operation_keeps_alpha() -> None:
+    im = Image.new("P", (1, 2))
+    im.putpalette((0, 0, 0, 0, 255, 0, 0, 128), "RGBA")
+    im.putpixel((0, 1), 1)
+
+    result = ImageOps.invert(im)
+
+    palette = result.getpalette("RGBA")
+    assert palette is not None
+    assert palette == [255, 255, 255, 0, 0, 255, 255, 128]
+
+
+# A fixed palette with a transparent entry, a repeated color and a translucent color
+PALETTE = [
+    (0, 0, 0, 0),
+    (255, 0, 0, 128),
+    (255, 0, 0, 128),
+    (32, 96, 160, 255),
+]
+
+INVERT_LUT = [255 - value for value in range(256)]
+POSTERIZE_LUT = [value & 0xF0 for value in range(256)]
+SOLARIZE_LUT = [value if value < 128 else 255 - value for value in range(256)]
+
+
+def _palette_image() -> Image.Image:
+    im = Image.new("P", (len(PALETTE), 1))
+    im.putpalette([channel for color in PALETTE for channel in color], "RGBA")
+    im.putdata(list(range(len(PALETTE))))
+    im.info["transparency"] = 0
+    return im
+
+
+def _channels(palette: list[tuple[int, int, int, int]]) -> list[int]:
+    return [channel for color in palette for channel in color]
+
+
+@pytest.mark.parametrize(
+    "operation, expected",
+    (
+        (
+            ImageOps.invert,
+            [
+                (255, 255, 255, 0),
+                (0, 255, 255, 128),
+                (0, 255, 255, 128),
+                (223, 159, 95, 255),
+            ],
+        ),
+        (
+            lambda im: ImageOps.posterize(im, 4),
+            [
+                (0, 0, 0, 0),
+                (240, 0, 0, 128),
+                (240, 0, 0, 128),
+                (32, 96, 160, 255),
+            ],
+        ),
+        (
+            ImageOps.solarize,
+            [
+                (0, 0, 0, 0),
+                (0, 0, 0, 128),
+                (0, 0, 0, 128),
+                (32, 96, 95, 255),
+            ],
+        ),
+    ),
+)
+def test_palette_operation_fixed_palette(
+    operation: Callable[[Image.Image], Image.Image],
+    expected: list[tuple[int, int, int, int]],
+) -> None:
+    im = _palette_image()
+
+    result = operation(im)
+
+    assert result.mode == "P"
+    # Pixel indices are unchanged, so the palette is what carries the colors
+    assert [result.getpixel((x, 0)) for x in range(len(PALETTE))] == list(
+        range(len(PALETTE))
+    )
+    assert result.getpalette("RGBA") == _channels(expected)
+    palette = result.getpalette("RGBA")
+    assert palette is not None
+    # The repeated palette entry is still repeated, and alpha is unchanged
+    assert palette[4:8] == palette[8:12]
+    # The transparency value in the info dictionary is preserved
+    assert result.info["transparency"] == 0
+    # The source image is not modified
+    assert im.getpalette("RGBA") == _channels(PALETTE)
+
+
+@pytest.mark.parametrize(
+    "operation, lut",
+    (
+        (ImageOps.invert, INVERT_LUT),
+        (lambda im: ImageOps.posterize(im, 4), POSTERIZE_LUT),
+        (ImageOps.solarize, SOLARIZE_LUT),
+    ),
+)
+def test_palette_operation_repeated(
+    operation: Callable[[Image.Image], Image.Image], lut: list[int]
+) -> None:
+    im = _palette_image()
+    once = operation(im)
+
+    twice = operation(once)
+
+    # The second call is applied to the colors, not the indices
+    once_palette = once.getpalette("RGBA")
+    assert once_palette is not None
+    expected = [
+        value if i % 4 == 3 else lut[value] for i, value in enumerate(once_palette)
+    ]
+    twice_palette = twice.getpalette("RGBA")
+    assert twice_palette == expected
+    # Indices and alpha are still unchanged
+    assert [twice.getpixel((x, 0)) for x in range(len(PALETTE))] == list(
+        range(len(PALETTE))
+    )
+    assert twice_palette is not None
+    assert twice_palette[3::4] == [color[3] for color in PALETTE]
+
+
+def test_palette_invert_repeated() -> None:
+    im = _palette_image()
+
+    result = ImageOps.invert(ImageOps.invert(im))
+
+    assert result.getpalette("RGBA") == _channels(PALETTE)
+    assert [result.getpixel((x, 0)) for x in range(len(PALETTE))] == list(
+        range(len(PALETTE))
+    )
+
+
+@pytest.mark.parametrize("threshold", (0, 1, 127, 128, 129, 255, 256))
+def test_palette_solarize_threshold(threshold: int) -> None:
+    im = Image.new("P", (256, 1))
+    im.putpalette([value for value in range(256) for _ in range(3)])
+    im.putdata(list(range(256)))
+
+    result = ImageOps.solarize(im, threshold)
+
+    # The threshold boundary matches the RGB path
+    assert_image_equal(
+        result.convert("RGB"), ImageOps.solarize(im.convert("RGB"), threshold)
+    )
+
+
+def test_palette_solarize_threshold_boundary() -> None:
+    im = Image.new("P", (256, 1))
+    im.putpalette([value for value in range(256) for _ in range(3)])
+    im.putdata(list(range(256)))
+
+    result = ImageOps.solarize(im, 127)
+
+    palette = result.getpalette()
+    assert palette is not None
+    # Values below the threshold are unchanged
+    assert palette[126 * 3 : 126 * 3 + 3] == [126, 126, 126]
+    # Values at or above the threshold are inverted
+    assert palette[127 * 3 : 127 * 3 + 3] == [128, 128, 128]
+    assert palette[128 * 3 : 128 * 3 + 3] == [127, 127, 127]
+
+
+@pytest.mark.parametrize(
+    "operation",
+    (
+        ImageOps.invert,
+        lambda im: ImageOps.posterize(im, 4),
+        ImageOps.solarize,
+    ),
+)
+def test_lut_unsupported_mode(
+    operation: Callable[[Image.Image], Image.Image],
+) -> None:
+    with pytest.raises(OSError, match="not supported for mode RGBA"):
+        operation(hopper("RGBA"))
+
+
+@pytest.mark.parametrize(
+    "operation, lut",
+    (
+        (ImageOps.invert, INVERT_LUT),
+        (lambda im: ImageOps.posterize(im, 4), POSTERIZE_LUT),
+        (ImageOps.solarize, SOLARIZE_LUT),
+    ),
+)
+@pytest.mark.parametrize("mode", ("L", "RGB"))
+def test_lut_mode_unchanged(
+    operation: Callable[[Image.Image], Image.Image], lut: list[int], mode: str
+) -> None:
+    im = hopper(mode)
+    # The lookup table is applied to the image data, as before
+    expected = im.point(lut if mode == "L" else lut * 3)
+    assert_image_equal(operation(im), expected)
+
+
+def test_palette_histogram_operation_not_supported() -> None:
+    im = hopper("P")
+    with pytest.raises(NotImplementedError, match="mode P support coming soon"):
+        ImageOps.autocontrast(im)

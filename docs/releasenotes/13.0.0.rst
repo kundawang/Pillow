@@ -131,6 +131,14 @@ Added ``escape`` argument to ``PSDraw.text()``
 The default, ``False``, preserves the existing handling of backslashes and PostScript
 escape sequences.
 
+ImageOps invert, posterize and solarize of P images
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:py:func:`~PIL.ImageOps.invert`, :py:func:`~PIL.ImageOps.posterize` and
+:py:func:`~PIL.ImageOps.solarize` now support P mode images. The operation is applied
+to the palette colors, leaving any alpha values in the palette unchanged. Previously,
+these functions raised :py:exc:`NotImplementedError` for P mode.
+
 Other changes
 =============
 
