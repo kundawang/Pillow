@@ -148,6 +148,19 @@ PyPy 3.12
 
 Wheels are now also built for PyPy 3.12, in addition to PyPy 3.11.
 
+Clipped F to I conversion to the INT32 range
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Converting an ``F`` mode image to ``I`` mode cast each pixel directly to a signed
+32-bit integer. Values outside the signed 32-bit range were undefined behaviour in
+C and, on common platforms, wrapped around to the opposite end of the range, so a
+large positive value could become a negative intensity and vice versa.
+
+Positive overflow is now clipped to ``INT32_MAX`` and negative overflow to
+``INT32_MIN``. Values within the range are still truncated towards zero, as before.
+The result is the same whether the whole image is converted with
+:py:meth:`~PIL.Image.Image.convert` or an individual pixel is converted.
+
 Faster JPEG 2000, TIFF, FreeType and LittleCMS in macOS and Linux wheels
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

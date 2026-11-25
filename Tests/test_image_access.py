@@ -201,6 +201,16 @@ class TestImageGetPixel:
         # pixelaccess is using signed int* instead of uint*
         self.check(mode, expected_color)
 
+    @pytest.mark.parametrize(
+        "color",
+        (0, 1, -1, 1.5, -1.5, -0.5, 2147483520.0, 2147483648.0, -2147483648.0),
+    )
+    def test_f_putpixel(self, color: float) -> None:
+        # Float values are stored as-is, without clipping to the "I" range.
+        im = Image.new("F", (1, 1))
+        im.putpixel((0, 0), color)
+        assert im.getpixel((0, 0)) == color
+
     @pytest.mark.parametrize("mode", ("P", "PA"))
     @pytest.mark.parametrize("color", ((255, 0, 0), (255, 0, 0, 255)))
     def test_p_putpixel_rgb_rgba(self, mode: str, color: tuple[int, ...]) -> None:
@@ -257,6 +267,14 @@ class TestImagePutPixelError:
         im = hopper(mode)
         with pytest.raises(OverflowError):
             im.putpixel((0, 0), 2**80)
+
+    def test_putpixel_type_error_float(self) -> None:
+        im = hopper("F")
+        for v in ("foo", None):
+            with pytest.raises(
+                TypeError, match="color must be int, float or single-element tuple"
+            ):
+                im.putpixel((0, 0), v)  # type: ignore[arg-type]
 
 
 class TestEmbeddable:

@@ -674,7 +674,15 @@ f2i(UINT8 *out_, const UINT8 *in_, int xsize) {
         FLOAT32 f;
         INT32 i;
         memcpy(&f, in_, sizeof(f));
-        i = f;
+        if (f >= (FLOAT32)INT32_MAX) {
+            i = INT32_MAX;
+        } else if (f >= INT32_MIN) {
+            /* Truncate towards zero, matching the historical behaviour. */
+            i = (INT32)f;
+        } else {
+            /* Also reached by NaN, since all comparisons with it are false. */
+            i = INT32_MIN;
+        }
         memcpy(out_, &i, sizeof(i));
     }
 }

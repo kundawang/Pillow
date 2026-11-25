@@ -92,6 +92,77 @@ def test_16bit_workaround() -> None:
         _test_float_conversion(im.convert("I"))
 
 
+@pytest.mark.parametrize(
+    "value, expected",
+    (
+        # Values outside the signed 32-bit range are clipped to its limits
+        # instead of wrapping around to the other end.
+        (2147483648.0, 2147483647),
+        (2147483647.0, 2147483647),
+        (2147483647.9, 2147483647),
+        (1e20, 2147483647),
+        (float("inf"), 2147483647),
+        (-2147483649.0, -2147483648),
+        (-2147483648.0, -2147483648),
+        (-2147483648.9, -2147483648),
+        (-1e20, -2147483648),
+        (float("-inf"), -2147483648),
+        (float("nan"), -2147483648),
+        # Values within the range keep the existing truncation rule.
+        (2147483520.0, 2147483520),
+        (0, 0),
+        (1, 1),
+        (1.9, 1),
+        (-1.5, -1),
+        (-5.5, -5),
+        (-0.5, 0),
+    ),
+)
+def test_f_to_i(value: float, expected: int) -> None:
+    im = Image.new("F", (1, 1), value)
+    assert im.convert("I").getpixel((0, 0)) == expected
+
+
+def test_f_to_i_image() -> None:
+    # The whole-image conversion must agree with the single-pixel result,
+    # including for positive and negative values just outside the INT32 range.
+    values = (
+        3e9,
+        2147483648.0,
+        2147483647.0,
+        2147483520.0,
+        1.9,
+        0.0,
+        -1.9,
+        -2147483648.0,
+        -2147483649.0,
+        -3e9,
+    )
+    expected = (
+        2147483647,
+        2147483647,
+        2147483647,
+        2147483520,
+        1,
+        0,
+        -1,
+        -2147483648,
+        -2147483648,
+        -2147483648,
+    )
+
+    im = Image.new("F", (len(values), 1))
+    im.putdata(values)
+    converted = im.convert("I")
+
+    assert converted.get_flattened_data() == expected
+    assert [converted.getpixel((x, 0)) for x in range(len(values))] == list(expected)
+
+    # Converting the same values one at a time must give the same result.
+    for value, result in zip(values, expected):
+        assert Image.new("F", (1, 1), value).convert("I").getpixel((0, 0)) == result
+
+
 def test_opaque() -> None:
     alpha = hopper("P").convert("PA").getchannel("A")
 
