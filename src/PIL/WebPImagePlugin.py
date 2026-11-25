@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 from io import BytesIO
 
 from . import Image, ImageFile
@@ -36,6 +37,102 @@ def _accept(prefix: bytes) -> bool | str:
     return False
 
 
+def _vp8_size(data: bytes, offset: int) -> tuple[int, int]:
+    # Parse the width and height from the start code of a lossy (VP8) bitstream.
+    # The bitstream begins with a 3-byte frame tag, followed by the 3-byte
+    # keyframe sync code and the width and height as 16-bit little-endian
+    # values (with the top two bits reserved).
+    if len(data) < offset + 10:
+        msg = "truncated VP8 chunk in WEBP file"
+        raise SyntaxError(msg)
+    if data[offset + 3 : offset + 6] != b"\x9d\x01\x2a":
+        msg = "invalid VP8 bitstream in WEBP file"
+        raise SyntaxError(msg)
+    width, height = struct.unpack_from("<HH", data, offset + 6)
+    return width & 0x3FFF, height & 0x3FFF
+
+
+def _vp8l_size(data: bytes, offset: int) -> tuple[int, int]:
+    # Parse the width and height from a lossless (VP8L) bitstream header
+    if len(data) < offset + 5:
+        msg = "truncated VP8L chunk in WEBP file"
+        raise SyntaxError(msg)
+    if data[offset] != 0x2F:
+        msg = "invalid VP8L bitstream in WEBP file"
+        raise SyntaxError(msg)
+    b0, b1, b2, b3 = data[offset + 1 : offset + 5]
+    width = 1 + (((b1 & 0x3F) << 8) | b0)
+    height = 1 + (((b3 & 0xF) << 10) | (b2 << 2) | ((b1 & 0xC0) >> 6))
+    return width, height
+
+
+def _validate_header(s: bytes) -> None:
+    """Validate the canvas and frame dimensions advertised by a WebP header
+    before any decoder is created or image memory is allocated."""
+    canvas_size: tuple[int, int] | None = None
+    frame_sizes: list[tuple[int, int]] = []
+
+    offset = 12
+    while offset + 8 <= len(s):
+        chunk = s[offset : offset + 4]
+        chunk_size = struct.unpack_from("<I", s, offset + 4)[0]
+        payload_offset = offset + 8
+        payload_end = payload_offset + chunk_size
+        if payload_end > len(s):
+            msg = "truncated chunk in WEBP file"
+            raise SyntaxError(msg)
+
+        if chunk == b"VP8X":
+            # Canvas width and height are stored as 24-bit values minus one
+            if chunk_size < 10:
+                msg = "truncated VP8X chunk in WEBP file"
+                raise SyntaxError(msg)
+            width = 1 + int.from_bytes(
+                s[payload_offset + 4 : payload_offset + 7], "little"
+            )
+            height = 1 + int.from_bytes(
+                s[payload_offset + 7 : payload_offset + 10], "little"
+            )
+            canvas_size = (width, height)
+        elif chunk == b"ANMF":
+            # The frame sub-rectangle is stored as 24-bit values minus one,
+            # before the embedded VP8/VP8L bitstream
+            if chunk_size < 12:
+                msg = "truncated ANMF chunk in WEBP file"
+                raise SyntaxError(msg)
+            width = 1 + int.from_bytes(
+                s[payload_offset + 6 : payload_offset + 9], "little"
+            )
+            height = 1 + int.from_bytes(
+                s[payload_offset + 9 : payload_offset + 12], "little"
+            )
+            frame_sizes.append((width, height))
+        elif chunk == b"VP8 ":
+            canvas_size = canvas_size or _vp8_size(s, payload_offset)
+        elif chunk == b"VP8L":
+            canvas_size = canvas_size or _vp8l_size(s, payload_offset)
+
+        # Chunks are padded to an even size
+        offset = payload_end + (chunk_size & 1)
+
+    if canvas_size is None:
+        msg = "missing image dimensions in WEBP file"
+        raise SyntaxError(msg)
+
+    Image._check_size(canvas_size)
+    if canvas_size[0] == 0 or canvas_size[1] == 0:
+        msg = "invalid WEBP canvas dimensions"
+        raise SyntaxError(msg)
+
+    Image._decompression_bomb_check(canvas_size)
+    for frame_size in frame_sizes:
+        Image._check_size(frame_size)
+        if frame_size[0] == 0 or frame_size[1] == 0:
+            msg = "invalid WEBP frame dimensions"
+            raise SyntaxError(msg)
+        Image._decompression_bomb_check(frame_size)
+
+
 class WebPImageFile(ImageFile.ImageFile):
     format = "WEBP"
     format_description = "WebP image"
@@ -48,6 +145,11 @@ class WebPImageFile(ImageFile.ImageFile):
         if not _accept(s):
             msg = "not a WEBP file"
             raise SyntaxError(msg)
+
+        # Validate the dimensions advertised in the header before creating
+        # the decoder, which would otherwise allocate buffers for a canvas
+        # that may exceed the image pixel limit
+        _validate_header(s)
 
         # Use the newer AnimDecoder API to parse the (possibly) animated file,
         # and access muxed chunks like ICC/EXIF/XMP.

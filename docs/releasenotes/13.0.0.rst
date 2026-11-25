@@ -4,10 +4,17 @@
 Security
 ========
 
-TODO
-^^^^
+WebP image dimensions checked before decoder creation
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-TODO
+When a WebP file header advertised a very large canvas or animation frame,
+Pillow could create the underlying decoder and allocate image buffers before
+the image pixel limit was enforced. ``WebPImagePlugin`` now parses the canvas
+and frame dimensions from the RIFF/VP8 headers and applies
+``Image._check_size`` and ``Image._decompression_bomb_check`` before
+constructing the decoder, so that oversized or invalid dimensions raise
+``Image.DecompressionBombError`` or ``SyntaxError`` without allocating the
+decoder buffers.
 
 :cve:`YYYY-XXXXX`: TODO
 ^^^^^^^^^^^^^^^^^^^^^^^

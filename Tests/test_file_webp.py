@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import re
 import sys
@@ -261,3 +262,175 @@ class TestFileWebp:
 
         with Image.open(temp_file) as im:
             assert im.getpixel((0, 0)) == (0, 0, 0, 0)
+
+
+def _webp_chunks(data: bytes) -> list[list[bytes | bytearray]]:
+    assert data[:4] == b"RIFF"
+    assert data[8:12] == b"WEBP"
+    chunks: list[list[bytes | bytearray]] = []
+    offset = 12
+    while offset + 8 <= len(data):
+        fourcc = data[offset : offset + 4]
+        size = int.from_bytes(data[offset + 4 : offset + 8], "little")
+        chunks.append([fourcc, bytearray(data[offset + 8 : offset + 8 + size])])
+        offset += 8 + size + (size & 1)
+    return chunks
+
+
+def _write_webp_chunks(chunks: list[list[bytes | bytearray]]) -> bytes:
+    body = b""
+    for fourcc, payload in chunks:
+        payload = bytes(payload)
+        body += (
+            fourcc
+            + len(payload).to_bytes(4, "little")
+            + payload
+            + (b"\0" if len(payload) & 1 else b"")
+        )
+    return b"RIFF" + (len(body) + 4).to_bytes(4, "little") + b"WEBP" + body
+
+
+@skip_unless_feature("webp")
+class TestWebpHeaderSizeCheck:
+    def _patch(self, path: str, chunk_name: bytes, mutate) -> bytes:
+        with open(path, "rb") as f:
+            chunks = _webp_chunks(f.read())
+        for chunk in chunks:
+            if chunk[0] == chunk_name:
+                mutate(chunk[1])
+        return _write_webp_chunks(chunks)
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "Tests/images/transparent.webp",  # VP8X static
+            "Tests/images/iss634.webp",  # VP8X animated
+        ],
+    )
+    def test_oversized_vp8x_canvas_rejected_before_decoder(
+        self, path: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def mutate(payload: bytearray) -> None:
+            # Canvas dimensions are 24-bit values minus one
+            payload[4:10] = b"\xff\xff\xff\xff\xff\xff"
+
+        data = self._patch(path, b"VP8X", mutate)
+
+        constructed = []
+        original = _webp.WebPAnimDecoder
+        monkeypatch.setattr(
+            _webp,
+            "WebPAnimDecoder",
+            lambda *args: constructed.append(1) or original(*args),
+        )
+
+        with pytest.raises(Image.DecompressionBombError):
+            Image.open(io.BytesIO(data))
+        assert constructed == []
+
+    def test_oversized_animated_frame_rejected_before_decoder(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def mutate(payload: bytearray) -> None:
+            # ANMF layout: x(3) y(3) width(3) height(3) duration(3) flags(1)
+            payload[6:12] = b"\xff\xff\xff\xff\xff\xff"
+
+        data = self._patch("Tests/images/iss634.webp", b"ANMF", mutate)
+
+        constructed = []
+        original = _webp.WebPAnimDecoder
+        monkeypatch.setattr(
+            _webp,
+            "WebPAnimDecoder",
+            lambda *args: constructed.append(1) or original(*args),
+        )
+
+        with pytest.raises(Image.DecompressionBombError):
+            Image.open(io.BytesIO(data))
+        assert constructed == []
+
+    def test_oversized_vp8_bitstream(self) -> None:
+        def mutate(payload: bytearray) -> None:
+            # Width/height are 16-bit values after the 3-byte frame tag and
+            # the 3-byte keyframe sync code
+            payload[6:10] = b"\xff\xff\xff\xff"
+
+        data = self._patch("Tests/images/hopper.webp", b"VP8 ", mutate)
+        with pytest.raises(Image.DecompressionBombError):
+            Image.open(io.BytesIO(data))
+
+    def test_oversized_vp8l_bitstream(self, tmp_path: Path) -> None:
+        temp_file = tmp_path / "lossless.webp"
+        with Image.open("Tests/images/hopper.webp") as im:
+            im.save(temp_file, lossless=True)
+        with open(temp_file, "rb") as f:
+            chunks = _webp_chunks(f.read())
+
+        for chunk in chunks:
+            if chunk[0] == b"VP8L":
+                payload = chunk[1]
+                assert payload[0] == 0x2F
+                # 14-bit width-1 then 14-bit height-1 packed little-endian
+                packed = 0x3FFF | (0x3FFF << 14)
+                payload[1] = packed & 0xFF
+                payload[2] = (packed >> 8) & 0xFF
+                payload[3] = (packed >> 16) & 0xFF
+                payload[4] = (packed >> 24) & 0xF
+        data = _write_webp_chunks(chunks)
+
+        with pytest.raises(Image.DecompressionBombError):
+            Image.open(io.BytesIO(data))
+
+    @pytest.mark.parametrize(
+        "path, chunk_name",
+        [
+            ("Tests/images/transparent.webp", b"VP8X"),
+            ("Tests/images/hopper.webp", b"VP8 "),
+        ],
+    )
+    def test_truncated_header_raises_syntax_error(
+        self, path: str, chunk_name: bytes
+    ) -> None:
+        with open(path, "rb") as f:
+            chunks = _webp_chunks(f.read())
+        for chunk in chunks:
+            if chunk[0] == chunk_name:
+                chunk[1] = chunk[1][:4]
+        data = _write_webp_chunks(chunks)
+
+        # Image.open wraps the plugin SyntaxError as UnidentifiedImageError
+        with pytest.raises(Image.UnidentifiedImageError):
+            Image.open(io.BytesIO(data))
+        with pytest.raises(SyntaxError):
+            WebPImagePlugin.WebPImageFile(io.BytesIO(data))
+
+    def test_zero_width_raises_syntax_error(self) -> None:
+        def mutate(payload: bytearray) -> None:
+            payload[6:8] = b"\x00\x00"  # width = 0
+
+        data = self._patch("Tests/images/hopper.webp", b"VP8 ", mutate)
+        with pytest.raises(SyntaxError):
+            WebPImagePlugin.WebPImageFile(io.BytesIO(data))
+
+    def test_bomb_warning_emitted_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        limit = 100 * 100
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", limit)
+
+        def mutate(payload: bytearray) -> None:
+            # 101 x 101 = 10201 pixels: above the limit but below 2x, so a
+            # warning rather than an error is expected
+            payload[6:8] = (101).to_bytes(2, "little")
+            payload[8:10] = (101).to_bytes(2, "little")
+
+        data = self._patch("Tests/images/hopper.webp", b"VP8 ", mutate)
+        # The default warning filter deduplicates identical messages, so the
+        # threshold warning fires only once even across repeated opens
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("default", Image.DecompressionBombWarning)
+            for _ in range(2):
+                with contextlib.suppress(Exception):
+                    Image.open(io.BytesIO(data))
+        bomb_warnings = [
+            w for w in caught if issubclass(w.category, Image.DecompressionBombWarning)
+        ]
+        assert len(bomb_warnings) == 1
