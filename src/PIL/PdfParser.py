@@ -692,32 +692,59 @@ class PdfParser:
         self.xref_table = XrefTable()
         self.read_xref_table(xref_section_offset=self.last_xref_section_offset)
         if b"Prev" in self.trailer_dict:
-            self.read_prev_trailer(self.trailer_dict[b"Prev"])
+            assert self.last_xref_section_offset is not None
+            self.read_prev_trailer(
+                self.trailer_dict[b"Prev"],
+                {self.last_xref_section_offset},
+            )
 
     def read_prev_trailer(
-        self, xref_section_offset: int, processed_offsets: list[int] | None = None
+        self,
+        xref_section_offset: int,
+        processed_offsets: set[int] | list[int] | None = None,
     ) -> None:
         assert self.buf is not None
-        trailer_offset = self.read_xref_table(xref_section_offset=xref_section_offset)
-        m = self.re_trailer_prev.search(
-            self.buf[trailer_offset : trailer_offset + 16384]
+        seen_offsets = (
+            set(processed_offsets) if processed_offsets is not None else set()
         )
-        check_format_condition(m is not None, "previous trailer not found")
-        assert m is not None
-        trailer_data = m.group(1)
-        check_format_condition(
-            int(m.group(2)) == xref_section_offset,
-            "xref section offset in previous trailer doesn't match what was expected",
-        )
-        trailer_dict = self.interpret_trailer(trailer_data)
-        if b"Prev" in trailer_dict:
-            if processed_offsets is None:
-                processed_offsets = []
-            processed_offsets.append(xref_section_offset)
+
+        # Walk the Prev chain iteratively. A PDF can have a long, acyclic chain
+        # of incremental updates, so recursion here would be bounded by Python's
+        # call-stack limit rather than by the file. The set also makes repeated
+        # offsets fail without quadratic membership checks.
+        while True:
             check_format_condition(
-                trailer_dict[b"Prev"] not in processed_offsets, "trailer loop found"
+                isinstance(xref_section_offset, int)
+                and not isinstance(xref_section_offset, bool),
+                "trailer /Prev must be a valid integer",
             )
-            self.read_prev_trailer(trailer_dict[b"Prev"], processed_offsets)
+            check_format_condition(
+                0 <= xref_section_offset < self.file_size_this,
+                f"trailer /Prev offset {xref_section_offset} is out of bounds",
+            )
+            check_format_condition(
+                xref_section_offset not in seen_offsets, "trailer loop found"
+            )
+            seen_offsets.add(xref_section_offset)
+
+            trailer_offset = self.read_xref_table(
+                xref_section_offset=xref_section_offset
+            )
+            m = self.re_trailer_prev.search(
+                self.buf, trailer_offset, trailer_offset + 16384
+            )
+            check_format_condition(m is not None, "previous trailer not found")
+            assert m is not None
+            trailer_data = m.group(1)
+            check_format_condition(
+                int(m.group(2)) == xref_section_offset,
+                "xref section offset in previous trailer "
+                "doesn't match what was expected",
+            )
+            trailer_dict = self.interpret_trailer(trailer_data)
+            if b"Prev" not in trailer_dict:
+                break
+            xref_section_offset = trailer_dict[b"Prev"]
 
     re_whitespace_optional = re.compile(whitespace_optional)
     re_name = re.compile(
