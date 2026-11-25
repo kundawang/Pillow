@@ -122,3 +122,10 @@ to help projects prepare for 3.15, and to ensure Pillow could be used
 immediately at the release of 3.15.0 final (2026-10-01, :pep:`790`).
 
 Pillow 13.0.0 now officially supports Python 3.15.
+
+Fixed ``Image.getbbox()`` for I;16 images
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:py:meth:`~PIL.Image.Image.getbbox` now considers the complete 16-bit pixel value
+for ``I;16``, ``I;16L`` and ``I;16B`` images. Previously, pixels where only the
+high or low byte was non-zero could be missed when calculating the bounding box.

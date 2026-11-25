@@ -30,12 +30,13 @@ ImagingGetBBox(Imaging im, int bbox[4], int alpha_only) {
     bbox[1] = -1;
     bbox[2] = bbox[3] = 0;
 
-#define GETBBOX(image, mask)                                 \
+#define GETBBOX(mask, type)                                  \
     /* first stage: looking for any pixels from top */       \
     for (y = 0; y < im->ysize; y++) {                        \
+        const type *row = (const type *)im->image[y];        \
         has_data = 0;                                        \
         for (x = 0; x < im->xsize; x++) {                    \
-            if (im->image[y][x] & mask) {                    \
+            if (row[x] & mask) {                             \
                 has_data = 1;                                \
                 bbox[0] = x;                                 \
                 bbox[1] = y;                                 \
@@ -52,9 +53,10 @@ ImagingGetBBox(Imaging im, int bbox[4], int alpha_only) {
     }                                                        \
     /* second stage: looking for any pixels from bottom */   \
     for (y = im->ysize - 1; y >= bbox[1]; y--) {             \
+        const type *row = (const type *)im->image[y];        \
         has_data = 0;                                        \
         for (x = 0; x < im->xsize; x++) {                    \
-            if (im->image[y][x] & mask) {                    \
+            if (row[x] & mask) {                             \
                 has_data = 1;                                \
                 if (x < bbox[0]) {                           \
                     bbox[0] = x;                             \
@@ -69,14 +71,15 @@ ImagingGetBBox(Imaging im, int bbox[4], int alpha_only) {
     }                                                        \
     /* third stage: looking for left and right boundaries */ \
     for (y = bbox[1]; y < bbox[3]; y++) {                    \
+        const type *row = (const type *)im->image[y];        \
         for (x = 0; x < bbox[0]; x++) {                      \
-            if (im->image[y][x] & mask) {                    \
+            if (row[x] & mask) {                             \
                 bbox[0] = x;                                 \
                 break;                                       \
             }                                                \
         }                                                    \
         for (x = im->xsize - 1; x >= bbox[2]; x--) {         \
-            if (im->image[y][x] & mask) {                    \
+            if (row[x] & mask) {                             \
                 bbox[2] = x + 1;                             \
                 break;                                       \
             }                                                \
@@ -84,7 +87,13 @@ ImagingGetBBox(Imaging im, int bbox[4], int alpha_only) {
     }
 
     if (im->image8) {
-        GETBBOX(image8, 0xff);
+        if (im->type == IMAGING_TYPE_I16) {
+            /* I;16 pixels are two bytes. Byte order does not matter when
+               checking whether the complete pixel is zero. */
+            GETBBOX(0xffff, UINT16);
+        } else {
+            GETBBOX(0xff, UINT8);
+        }
     } else {
         INT32 mask = 0xffffffff;
         if (im->bands == 3) {
@@ -101,7 +110,7 @@ ImagingGetBBox(Imaging im, int bbox[4], int alpha_only) {
             mask = 0xff000000;
 #endif
         }
-        GETBBOX(image32, mask);
+        GETBBOX(mask, INT32);
     }
 
     return 1; /* ok */
