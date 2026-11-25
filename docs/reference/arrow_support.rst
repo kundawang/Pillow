@@ -75,6 +75,20 @@ Unsupported features
   parameter.
 * Array metadata.
 
+Validation
+==========
+
+Before an Arrow array is imported, its structure is validated: the
+schema format, array length, offset, null count, null bitmap, child
+arrays and data buffers are all checked, and malformed structures are
+rejected with a :py:exc:`ValueError`.
+
+The Arrow C Data Interface does not transmit buffer capacities, so
+when the producer also exposes buffer sizes at the Python level (for
+example, pyarrow), the declared length and offset are additionally
+checked against the actual buffer capacity. Producers that only export
+the bare capsules are validated structurally.
+
 Internal details
 ================
 

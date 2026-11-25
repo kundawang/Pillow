@@ -308,3 +308,21 @@ def test_zero_dimension() -> None:
     array = pyarrow.array([], type=pyarrow.uint8())
     assert Image.fromarrow(array, "L", (0, 7)).size == (0, 7)
     assert Image.fromarrow(array, "L", (7, 0)).size == (7, 0)
+
+
+def test_sliced_array() -> None:
+    # a sliced array has a non-zero offset into its data buffer
+    arr = pyarrow.array(list(range(20)), type=pyarrow.uint8()).slice(10, 10)
+    assert arr.offset == 10
+
+    img = Image.fromarrow(arr, "L", (5, 2))
+    assert list(img.getdata()) == list(range(10, 20))
+
+
+def test_sliced_array_with_nulls() -> None:
+    arr = pyarrow.array([0, 1, 2, None, 4, 5, 6, 7], type=pyarrow.uint8()).slice(2, 4)
+    assert arr.offset == 2
+    assert arr.null_count == 1
+
+    img = Image.fromarrow(arr, "L", (2, 2))
+    assert img.size == (2, 2)

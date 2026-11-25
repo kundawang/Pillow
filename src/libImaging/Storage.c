@@ -536,6 +536,41 @@ ImagingDestroyArrow(Imaging im) {
     }
 }
 
+/* Validate the scalar fields of a single ArrowArray node before any of
+   its pointers are dereferenced, so that malformed structures are
+   rejected instead of triggering out-of-bounds reads. */
+static int
+ImagingValidateArrowArrayNode(struct ArrowArray *arr) {
+    if (arr->length < 0) {
+        ImagingError_ValueError("Arrow Array, negative length");
+        return 0;
+    }
+    if (arr->offset < 0) {
+        ImagingError_ValueError("Arrow Array, negative offset");
+        return 0;
+    }
+    if (arr->offset > INT64_MAX - arr->length) {
+        ImagingError_ValueError("Arrow Array, offset and length overflow");
+        return 0;
+    }
+    /* null_count may be -1 (unknown), 0, or at most length */
+    if (arr->null_count < -1 || arr->null_count > arr->length) {
+        ImagingError_ValueError("Arrow Array, invalid null count");
+        return 0;
+    }
+    /* a null bitmap is required when the null count is non-zero */
+    if (arr->null_count != 0 &&
+        (arr->n_buffers < 1 || !arr->buffers || !arr->buffers[0])) {
+        ImagingError_ValueError("Arrow Array, missing null bitmap");
+        return 0;
+    }
+    if (arr->n_children < 0 || (arr->n_children > 0 && !arr->children)) {
+        ImagingError_ValueError("Arrow Array, missing child arrays");
+        return 0;
+    }
+    return 1;
+}
+
 int
 ImagingBorrowArrow(
     Imaging im,
@@ -550,18 +585,27 @@ ImagingBorrowArrow(
     struct ArrowArray *arr = external_array;
 
     if (arr->n_children == 1) {
+        if (!arr->children || !arr->children[0]) {
+            ImagingError_ValueError("Arrow Array, missing child array");
+            return 0;
+        }
         arr = arr->children[0];
+        if (!ImagingValidateArrowArrayNode(arr)) {
+            return 0;
+        }
     }
-    if (arr->n_buffers == 2) {
-        // buffer 0 is the null list
-        // buffer 1 is the data
-        borrowed_buffer = (char *)arr->buffers[1] + (offset_width * arr->offset);
+    if (arr->offset > INT64_MAX / offset_width) {
+        ImagingError_ValueError("Arrow Array, offset too large");
+        return 0;
     }
-
-    if (!borrowed_buffer) {
+    if (arr->n_buffers != 2 || !arr->buffers || !arr->buffers[1]) {
         ImagingError_ValueError("Arrow Array, exactly 2 buffers required");
         return 0;
     }
+
+    // buffer 0 is the null list
+    // buffer 1 is the data
+    borrowed_buffer = (char *)arr->buffers[1] + (offset_width * arr->offset);
 
     for (y = i = 0; y < im->ysize; y++) {
         im->image[y] = borrowed_buffer + i;
@@ -695,6 +739,16 @@ ImagingNewArrow(
         return NULL;
     }
 
+    if (!schema->format) {
+        ImagingDelete(im);
+        return (Imaging)ImagingError_ValueError("Arrow Schema, missing format");
+    }
+
+    if (!ImagingValidateArrowArrayNode(external_array)) {
+        ImagingDelete(im);
+        return NULL;
+    }
+
     int64_t pixels = (int64_t)xsize * (int64_t)ysize;
 
     // fmt:off   // don't reformat this
@@ -719,11 +773,14 @@ ImagingNewArrow(
         && im->pixelsize == 4                // storage as 32 bpc
         && schema->n_children > 0            // make sure schema is well formed.
         && schema->children                  // make sure schema is well formed
+        && schema->children[0]               // make sure schema is well formed
+        && schema->children[0]->format       // make sure schema is well formed
         && strcmp(schema->children[0]->format, "C") == 0  // Expected format
         && strcmp(im->arrow_band_format, "C") == 0        // Expected Format
         && pixels == external_array->length               // expected length
         && external_array->n_children == 1                // array is well formed
         && external_array->children                       // array is well formed
+        && external_array->children[0]                    // array is well formed
         && 4 * pixels == external_array->children[0]->length) {
         // 4 up element of char into pixelsize == 4
         if (!ImagingBorrowArrow(im, external_array, 1, array_capsule)) {

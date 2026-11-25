@@ -3484,6 +3484,61 @@ def fromarray(obj: SupportsArrayInterface, mode: str | None = None) -> Image:
     return frombuffer(mode, size, obj, "raw", rawmode, 0, 1)
 
 
+def _validate_arrow_buffers(obj: object) -> None:
+    """Best-effort validation that an Arrow producer's data buffers are
+    large enough for the declared array length and offset.
+
+    The Arrow C Data Interface does not transmit buffer capacities, so
+    this is only possible when the producer also exposes them at the
+    Python level (e.g. pyarrow's ``offset``, ``null_count`` and
+    ``buffers()``). Producers that do not expose buffer sizes are
+    validated structurally in C instead.
+    """
+    offset = getattr(obj, "offset", None)
+    null_count = getattr(obj, "null_count", None)
+    buffers = getattr(obj, "buffers", None)
+    if (
+        not isinstance(offset, int)
+        or not isinstance(null_count, int)
+        or not callable(buffers)
+    ):
+        return
+    try:
+        length = len(obj)  # type: ignore[arg-type]
+        buffer_list = list(buffers())
+    except Exception:
+        return
+    if offset < 0 or length < 0:
+        msg = "Arrow array with negative offset or length"
+        raise ValueError(msg)
+    if null_count != 0:
+        # the null bitmap must cover offset + length bits
+        validity = buffer_list[0] if buffer_list else None
+        size = getattr(validity, "size", None)
+        needed = (offset + length + 7) // 8
+        if needed > 0 and (not isinstance(size, int) or size < needed):
+            msg = "Arrow null bitmap smaller than declared length"
+            raise ValueError(msg)
+    arrow_type = getattr(obj, "type", None)
+    try:
+        bit_width = getattr(arrow_type, "bit_width", None)
+    except ValueError:
+        # pyarrow raises for non-fixed-width (e.g. nested) types
+        bit_width = None
+    if isinstance(bit_width, int):
+        # primitive array: the last buffer holds the data
+        data = buffer_list[-1] if buffer_list else None
+        size = getattr(data, "size", None)
+        needed = ((offset + length) * bit_width + 7) // 8
+        if needed > 0 and (not isinstance(size, int) or size < needed):
+            msg = "Arrow data buffer smaller than declared length"
+            raise ValueError(msg)
+    values = getattr(obj, "values", None)
+    if values is not None and values is not obj:
+        # nested array (e.g. fixed-size-list): validate the child buffers
+        _validate_arrow_buffers(values)
+
+
 def fromarrow(
     obj: SupportsArrowArrayInterface, mode: str, size: tuple[int, int]
 ) -> Image:
@@ -3526,6 +3581,8 @@ def fromarrow(
     if not hasattr(obj, "__arrow_c_array__"):
         msg = "arrow_c_array interface not found"
         raise ValueError(msg)
+
+    _validate_arrow_buffers(obj)
 
     schema_capsule, array_capsule = obj.__arrow_c_array__()
     _im = core.new_arrow(mode, size, schema_capsule, array_capsule)

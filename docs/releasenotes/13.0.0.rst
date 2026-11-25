@@ -14,6 +14,21 @@ TODO
 
 TODO
 
+Validate Arrow arrays in Image.fromarrow
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:py:meth:`~PIL.Image.fromarrow` accepted Arrow arrays exported by external
+producers without fully validating them. Malformed structures — negative
+lengths or offsets, out-of-range null counts, missing null bitmaps, missing
+child arrays or missing data buffers — could trigger out-of-bounds reads or
+crash the process.
+
+The Arrow schema and array structures are now validated before any buffer is
+read, and malformed structures are rejected with a :py:exc:`ValueError`. When
+the producer also exposes buffer sizes at the Python level (for example,
+pyarrow), the declared length and offset are additionally checked against the
+actual buffer capacity.
+
 Backwards incompatible changes
 ==============================
 
