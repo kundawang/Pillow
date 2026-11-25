@@ -114,6 +114,13 @@ Two new filters are available for :py:meth:`~PIL.Image.Image.resize` and
 Other changes
 =============
 
+ImageChops.offset() for I;16 images
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:py:meth:`PIL.ImageChops.offset` now offsets I;16, I;16B and I;16L images by
+whole pixels instead of bytes. Previously, the high and low bytes of a 16-bit
+pixel could be separated when the data wrapped around the edges.
+
 Python 3.15
 ^^^^^^^^^^^
 

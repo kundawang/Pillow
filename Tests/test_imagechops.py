@@ -291,6 +291,59 @@ def test_offset_zero_size(size: tuple[int, int]) -> None:
     assert_image_equal(ImageChops.offset(im, 1, 1), im)
 
 
+@pytest.mark.parametrize("mode", ("I;16", "I;16B", "I;16L"))
+def test_offset_i16(mode: str) -> None:
+    # 16-bit pixels must be offset as whole pixels, not bytes.
+    # Each pixel has distinct high and low bytes so that any
+    # byte-level split is detected.
+    width, height = 4, 3
+    values = [
+        0x0102,
+        0x0304,
+        0x0506,
+        0x0708,
+        0x1112,
+        0x1314,
+        0x1516,
+        0x1718,
+        0x2122,
+        0x2324,
+        0x2526,
+        0x2728,
+    ]
+    im = Image.new(mode, (width, height))
+    im.putdata(values)
+
+    def expected(xoffset: int, yoffset: int) -> list[int]:
+        return [
+            values[(x - xoffset) % width + width * ((y - yoffset) % height)]
+            for y in range(height)
+            for x in range(width)
+        ]
+
+    for xoffset, yoffset in ((1, 0), (0, 1), (1, 1), (3, 2), (-1, -1), (-3, -2)):
+        new = ImageChops.offset(im, xoffset, yoffset)
+        assert list(new.get_flattened_data()) == expected(xoffset, yoffset)
+
+    # Offsets larger than the image wrap around
+    assert list(ImageChops.offset(im, width + 1, height + 1).get_flattened_data()) == (
+        expected(1, 1)
+    )
+
+    # Zero offset is a copy
+    assert list(ImageChops.offset(im, 0, 0).get_flattened_data()) == values
+
+
+def test_offset_i16_readonly() -> None:
+    im = Image.new("I;16", (2, 2))
+    im.putdata([0x0102, 0x0304, 0x0506, 0x0708])
+    im.readonly = 1
+
+    new = ImageChops.offset(im, 1, 1)
+
+    assert list(new.get_flattened_data()) == [0x0708, 0x0506, 0x0304, 0x0102]
+
+
 def test_screen() -> None:
     # Arrange
     with Image.open("Tests/images/imagedraw_ellipse_RGB.png") as im1:

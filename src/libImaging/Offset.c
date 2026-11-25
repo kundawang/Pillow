@@ -58,7 +58,22 @@ ImagingOffset(Imaging im, int xoffset, int yoffset) {
     }
 
     if (im->image8) {
-        OFFSET(image8)
+        if (im->pixelsize == 1) {
+            OFFSET(image8)
+        } else {
+            /* 16-bit pixels (e.g. I;16): offset in whole pixels, not bytes */
+            for (y = 0; y < im->ysize; y++) {
+                int yi = (y + yoffset) % im->ysize;
+                for (x = 0; x < im->xsize; x++) {
+                    int xi = (x + xoffset) % im->xsize;
+                    memcpy(
+                        imOut->image[y] + x * im->pixelsize,
+                        im->image[yi] + xi * im->pixelsize,
+                        im->pixelsize
+                    );
+                }
+            }
+        }
     } else {
         OFFSET(image32)
     }
