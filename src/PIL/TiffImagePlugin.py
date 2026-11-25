@@ -617,7 +617,9 @@ class ImageFileDirectory_v2(_IFDv2Base):
         else:
             msg = "not a TIFF IFD"
             raise SyntaxError(msg)
-        self._bigtiff = ifh[2] == 43
+        # The version field is a short in the file's byte order, so for
+        # big-endian BigTIFF the marker is in the second of these bytes
+        self._bigtiff = 43 in ifh[2:4]
         self.group = group
         self.tagtype: dict[int, int] = {}
         """ Dictionary of tag types """
@@ -991,6 +993,10 @@ class ImageFileDirectory_v2(_IFDv2Base):
             logger.debug("Tag %s, Type: %s, Value: %s", tag, typ, repr(value))
             is_ifd = typ == TiffTags.LONG and isinstance(value, dict)
             if is_ifd:
+                if self._bigtiff and offset >= 2**32:
+                    # Offset is too large for a LONG
+                    # BigTIFF allows an 8-byte offset to the sub-IFD
+                    typ = TiffTags.LONG8
                 ifd = ImageFileDirectory_v2(self._get_ifh(), group=tag)
                 values = self._tags_v2[tag]
                 for ifd_tag, ifd_value in values.items():
@@ -1015,20 +1021,44 @@ class ImageFileDirectory_v2(_IFDv2Base):
                 count = len(values)
             # figure out if data fits into the entry
             if len(data) <= fmt_size:
-                entries.append((tag, typ, count, data.ljust(fmt_size, b"\0"), b""))
+                value = data.ljust(fmt_size, b"\0")
+                data = b""
             else:
-                entries.append((tag, typ, count, self._pack(fmt, offset), data))
+                if is_ifd and typ == TiffTags.LONG and self._bigtiff:
+                    # The offset needs to be left-justified within a BigTIFF
+                    # entry, because only the first 4 bytes will be read from
+                    # this LONG, regardless of endianness
+                    value = self._pack("L", offset).ljust(fmt_size, b"\0")
+                else:
+                    value = self._pack(fmt, offset)
                 offset += (len(data) + 1) // 2 * 2  # pad to word
+            entries.append((tag, typ, count, value, data))
 
         # update strip offset data to point beyond auxiliary data
         if stripoffsets is not None:
             tag, typ, count, value, data = entries[stripoffsets]
+            _, handler = self._load_dispatch[typ]
+            # An inline value is stored in the same width as an offset field,
+            # but its type may be narrower (e.g. LONG in a BigTIFF entry), so
+            # decode it with the tag's own type rather than the offset width
+            values = [
+                val + offset for val in handler(self, data or value, self.legacy_api)
+            ]
             if data:
-                size, handler = self._load_dispatch[typ]
-                values = [val + offset for val in handler(self, data, self.legacy_api)]
                 data = self._write_dispatch[typ](self, *values)
             else:
-                value = self._pack(fmt, self._unpack(fmt, value)[0] + offset)
+                # The offsets fit within the entry
+                # May be one offset, or two LONG offsets in BigTIFF
+                if (
+                    self._bigtiff
+                    and typ == TiffTags.LONG
+                    and count == 1
+                    and values[0] >= 2**32
+                ):
+                    # If a single offset is too large for a LONG,
+                    # in BigTIFF there is room to change the entry to LONG8
+                    typ = TiffTags.LONG8
+                value = self._write_dispatch[typ](self, *values).ljust(fmt_size, b"\0")
             entries[stripoffsets] = tag, typ, count, value, data
 
         # pass 2: write entries to file
@@ -1193,7 +1223,7 @@ class TiffImageFile(ImageFile.ImageFile):
         # Header
         assert self.fp is not None
         ifh = self.fp.read(8)
-        if ifh[2] == 43:
+        if 43 in ifh[2:4]:
             ifh += self.fp.read(8)
 
         self.tag_v2 = ImageFileDirectory_v2(ifh)

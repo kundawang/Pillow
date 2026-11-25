@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import struct
 import warnings
 from io import BytesIO
 
@@ -100,11 +101,14 @@ class TestFileTiff:
 
             assert_image_similar_tofile(im, "Tests/images/pil136.png", 1)
 
-    def test_bigtiff(self, tmp_path: Path) -> None:
-        with Image.open("Tests/images/hopper_bigtiff.tif") as im:
+    @pytest.mark.parametrize(
+        "test_file",
+        ("Tests/images/hopper_bigtiff.tif", "Tests/images/hopper_bigtiff_be.tif"),
+    )
+    def test_bigtiff(self, test_file: str, tmp_path: Path) -> None:
+        with Image.open(test_file) as im:
             assert_image_equal_tofile(im, "Tests/images/hopper.tif")
 
-        with Image.open("Tests/images/hopper_bigtiff.tif") as im:
             outfile = tmp_path / "temp.tif"
             assert isinstance(im, TiffImagePlugin.TiffImageFile)
             im.save(outfile, save_all=True, append_images=[im], tiffinfo=im.tag_v2)
@@ -123,6 +127,232 @@ class TestFileTiff:
         with Image.open(outfile) as reloaded:
             assert isinstance(reloaded, TiffImagePlugin.TiffImageFile)
             assert reloaded.tag_v2._bigtiff is True
+
+    @pytest.mark.parametrize("mode", ("L", "I;16B"))
+    @pytest.mark.parametrize("big_tiff", (False, True))
+    def test_bigtiff_multiframe(
+        self, mode: str, big_tiff: bool, tmp_path: Path
+    ) -> None:
+        outfile = tmp_path / "temp.tif"
+        # I;16B is saved as big-endian, while L is little-endian
+        frames = [Image.new(mode, (4, 4), value) for value in (100, 200, 300)]
+        frames[0].save(
+            outfile,
+            save_all=True,
+            append_images=frames[1:],
+            big_tiff=big_tiff,
+        )
+
+        with Image.open(outfile) as reloaded:
+            assert reloaded.tag_v2._bigtiff is big_tiff
+            assert reloaded.tag_v2.prefix == (b"MM" if mode == "I;16B" else b"II")
+            assert reloaded.n_frames == 3
+            assert reloaded.is_animated
+
+            for frame_number, expected in enumerate(frames):
+                reloaded.seek(frame_number)
+                reloaded.load()
+                assert reloaded.getpixel((0, 0)) == expected.getpixel((0, 0))
+
+    def test_bigtiff_save_big_endian_ifd(self, tmp_path: Path) -> None:
+        outfile = tmp_path / "temp.tif"
+        with Image.open("Tests/images/exif_gps.jpg") as jpeg:
+            exif = jpeg.getexif()
+        gps = exif.get_ifd(0x8825)
+        assert gps
+
+        # I;16B is saved as big-endian
+        im = Image.new("I;16B", (1, 1))
+        im.save(outfile, big_tiff=True, exif=exif)
+
+        with Image.open(outfile) as reloaded:
+            assert isinstance(reloaded, TiffImagePlugin.TiffImageFile)
+            assert reloaded.tag_v2.prefix == b"MM"
+            assert reloaded.tag_v2._bigtiff is True
+            assert reloaded.tag_v2.tagtype[0x8825] == TiffTags.LONG
+            assert reloaded.getexif().get_ifd(0x8825) == gps
+
+            # Check that a LONG tag is upgraded to LONG8
+            # when the offset is large enough to make it necessary
+            reloaded.tag_v2.tagtype[32768] = TiffTags.LONG
+            reloaded.tag_v2[32768] = {}
+            data = reloaded.tag_v2.tobytes(2**32)
+
+        ifd = TiffImagePlugin.ImageFileDirectory_v2(b"MM\x00\x2b" + b"\x00" * 12)
+        ifd.load(BytesIO(data))
+        assert ifd.tagtype[32768] == TiffTags.LONG8
+
+    def test_bigtiff_save_two_strips(self, tmp_path: Path) -> None:
+        outfile = tmp_path / "temp.tif"
+        im = hopper("L")
+
+        # Two LONG strip offsets fit within a BigTIFF entry
+        im.save(outfile, big_tiff=True, tiffinfo={TiffImagePlugin.ROWSPERSTRIP: 64})
+
+        with Image.open(outfile) as reloaded:
+            assert isinstance(reloaded, TiffImagePlugin.TiffImageFile)
+            assert len(reloaded.tag_v2[TiffImagePlugin.STRIPOFFSETS]) == 2
+            assert_image_equal(reloaded, im)
+
+    @pytest.mark.parametrize(
+        "mode",
+        ("L", "I;16B"),
+    )
+    @pytest.mark.parametrize("big_tiff", (False, True))
+    def test_bigtiff_save_strip_offsets(
+        self, mode: str, big_tiff: bool, tmp_path: Path
+    ) -> None:
+        outfile = tmp_path / "temp.tif"
+        # I;16B is saved as big-endian, while L is little-endian
+        im = hopper(mode)
+
+        im.save(
+            outfile,
+            big_tiff=big_tiff,
+            tiffinfo={TiffImagePlugin.ROWSPERSTRIP: 64},
+        )
+
+        with Image.open(outfile) as reloaded:
+            assert isinstance(reloaded, TiffImagePlugin.TiffImageFile)
+            assert reloaded.tag_v2._bigtiff is big_tiff
+            assert reloaded.tag_v2.prefix == (b"MM" if mode == "I;16B" else b"II")
+            assert len(reloaded.tag_v2[TiffImagePlugin.STRIPOFFSETS]) == 2
+            assert_image_equal(reloaded, im)
+
+    def test_bigtiff_save_big_endian_strip_offset(self, tmp_path: Path) -> None:
+        outfile = tmp_path / "temp.tif"
+        # I;16B is saved as big-endian
+        im = hopper("I;16B")
+
+        # The single LONG strip offset fits within a BigTIFF entry
+        im.save(outfile, big_tiff=True)
+
+        with Image.open(outfile) as reloaded:
+            assert isinstance(reloaded, TiffImagePlugin.TiffImageFile)
+            assert reloaded.tag_v2.prefix == b"MM"
+            assert reloaded.tag_v2._bigtiff is True
+            assert (
+                reloaded.tag_v2.tagtype[TiffImagePlugin.STRIPOFFSETS] == TiffTags.LONG
+            )
+            assert len(reloaded.tag_v2[TiffImagePlugin.STRIPOFFSETS]) == 1
+            assert_image_equal(reloaded, im)
+
+            # Check that the strip offset is upgraded to LONG8
+            # when it is too large for a LONG
+            data = reloaded.tag_v2.tobytes(2**32)
+
+        ifd = TiffImagePlugin.ImageFileDirectory_v2(b"MM\x00\x2b" + b"\x00" * 12)
+        ifd.load(BytesIO(data))
+        assert ifd.tagtype[TiffImagePlugin.STRIPOFFSETS] == TiffTags.LONG8
+        assert ifd[TiffImagePlugin.STRIPOFFSETS][0] > 2**32
+
+    def test_bigtiff_read_big_endian_ifd(self) -> None:
+        with Image.open("Tests/images/hopper_bigtiff_be.tif") as im:
+            assert im.tag_v2.prefix == b"MM"
+            assert im.tag_v2._bigtiff is True
+            assert im.tag_v2._endian == ">"
+            # An inline SHORT value is stored in the first two bytes after the
+            # 64-bit count, so it must not be read from the tail of the entry
+            assert im.tag_v2[TiffImagePlugin.BITSPERSAMPLE] == (8, 8, 8)
+            assert len(im.tag_v2[TiffImagePlugin.STRIPOFFSETS]) == 7
+            assert len(im.tag_v2[TiffImagePlugin.STRIPBYTECOUNTS]) == 7
+
+    def test_bigtiff_big_endian_nested_ifd(self) -> None:
+        # A nested IFD is written with the same byte order as its parent,
+        # so the offset stored in the parent must be big-endian too
+        ifd = TiffImagePlugin.ImageFileDirectory_v2(b"MM\x00\x2b" + b"\x00" * 12)
+        ifd[34665] = {1: 2}
+
+        data = ifd.tobytes(16)
+
+        tag, typ, count, value = struct.unpack(">HHQ8s", data[8:28])
+        assert (tag, typ, count) == (34665, TiffTags.LONG, 1)
+        # Only the first four bytes of the entry are read for a LONG, so the
+        # offset must be left-justified in the eight byte value field
+        nested_offset = struct.unpack(">L", value[:4])[0]
+
+        nested = TiffImagePlugin.ImageFileDirectory_v2(
+            b"MM\x00\x2b" + b"\x00" * 12, group=34665
+        )
+        nested.load(BytesIO(data[nested_offset - 16 :]))
+        assert nested[1] == 2
+
+    @pytest.mark.parametrize("prefix", (b"II", b"MM"))
+    @pytest.mark.parametrize("big_tiff", (False, True))
+    def test_truncated_ifd(self, prefix: bytes, big_tiff: bool) -> None:
+        endian = ">" if prefix == b"MM" else "<"
+        ifensize = 20 if big_tiff else 12
+        if big_tiff:
+            header = (
+                prefix
+                + struct.pack(endian + "H", 43)
+                + struct.pack(endian + "HH", 8, 0)
+                + struct.pack(endian + "Q", 16)
+            )
+            data = (
+                header
+                + struct.pack(endian + "Q", 5)
+                + struct.pack(endian + "HHQ8s", 256, 4, 1, struct.pack(endian + "L", 1))
+            )
+        else:
+            header = (
+                prefix + struct.pack(endian + "H", 42) + struct.pack(endian + "L", 8)
+            )
+            data = (
+                header
+                + struct.pack(endian + "H", 5)
+                + struct.pack(endian + "HHL4s", 256, 4, 1, struct.pack(endian + "L", 1))
+            )
+
+        # The header claims five entries, but the IFD is cut off after one
+        assert len(data) == (16 if big_tiff else 8) + (8 if big_tiff else 2) + ifensize
+        with pytest.warns(UserWarning, match="Corrupt EXIF data"):
+            with pytest.raises(UnidentifiedImageError):
+                Image.open(BytesIO(data))
+
+    @pytest.mark.parametrize("mode", ("L", "I;16B"))
+    @pytest.mark.parametrize("big_tiff", (False, True))
+    def test_invalid_strip_offset(
+        self, mode: str, big_tiff: bool, tmp_path: Path
+    ) -> None:
+        outfile = tmp_path / "temp.tif"
+        # I;16B is saved as big-endian, while L is little-endian
+        im = Image.new(mode, (1, 1))
+        im.save(outfile, big_tiff=big_tiff)
+
+        data = bytearray(outfile.read_bytes())
+        byteorder = "big" if data[:2] == b"MM" else "little"
+        header_size = 16 if big_tiff else 8
+        offset_size = 8 if big_tiff else 4
+        ifd_offset = int.from_bytes(
+            data[header_size - offset_size : header_size], byteorder
+        )
+
+        # Point the strip offset beyond the end of the file
+        ifd = TiffImagePlugin.ImageFileDirectory_v2(bytes(data[:header_size]))
+        assert ifd.next == ifd_offset
+        entry_size = 20 if big_tiff else 12
+        count_size = 8 if big_tiff else 2
+        count = int.from_bytes(data[ifd_offset : ifd_offset + count_size], byteorder)
+        entry = ifd_offset + count_size
+        for _ in range(count):
+            tag = int.from_bytes(data[entry : entry + 2], byteorder)
+            typ = int.from_bytes(data[entry + 2 : entry + 4], byteorder)
+            if tag == TiffImagePlugin.STRIPOFFSETS:
+                # A LONG is read from the start of an eight byte BigTIFF value
+                value_size = 4 if typ == TiffTags.LONG else offset_size
+                value = entry + 4 + (8 if big_tiff else 4)
+                data[value : value + value_size] = (len(data) + 100).to_bytes(
+                    value_size, byteorder
+                )
+                break
+            entry += entry_size
+        else:
+            pytest.fail("StripOffsets tag not found")
+
+        with Image.open(BytesIO(bytes(data))) as reloaded:
+            with pytest.raises(OSError):
+                reloaded.load()
 
     def test_seek_too_large(self) -> None:
         with pytest.raises(ValueError, match="Unable to seek to frame"):

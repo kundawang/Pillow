@@ -270,6 +270,24 @@ position or contents.
 :py:meth:`~PIL.Image.Image.tobytes` also now explicitly cleans up its encoder on
 both success and failure, rather than relying on object destruction.
 
+Fixed reading and writing big-endian BigTIFF images
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+BigTIFF files store the version number as a 16-bit field, so a big-endian file
+has the BigTIFF marker (``0x2b``) in the second byte rather than the first.
+Pillow only checked the first byte, so such files were treated as ordinary TIFF.
+Their 64-bit IFD counts, entry counts and offsets were then parsed as 32-bit
+values, losing pixels and metadata. Saving an image to a big-endian BigTIFF
+(for example, ``I;16B`` with the ``big_tiff`` argument) produced a file that
+could not be reopened.
+
+Big-endian BigTIFF files are now read and written correctly. Fixed-size values
+that fit within an IFD entry, such as a ``SHORT`` inside an eight-byte BigTIFF
+entry, are also now read from the correct position in the entry regardless of
+byte order. Strip offsets that fit within an entry are written using the tag's
+own type, and a 32-bit offset that is too large is upgraded to a 64-bit offset
+when there is room for it. Nested IFDs use the same byte order as their parent.
+
 Fixed reading PSD layers at the wrong file offset
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
