@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import operator
 import re
 import struct
 import warnings
@@ -1121,6 +1122,11 @@ _OUTMODES = {
     # supported PIL modes, and corresponding rawmode, bit depth and color type
     "1": ("1", b"\x01", b"\x00"),
     "L": ("L", b"\x08", b"\x00"),
+    # The P raw modes provide MSB-first packed scanlines.  They are used only
+    # as packing formats for quantized grayscale samples.
+    "L;1": ("P;1", b"\x01", b"\x00"),
+    "L;2": ("P;2", b"\x02", b"\x00"),
+    "L;4": ("P;4", b"\x04", b"\x00"),
     "LA": ("LA", b"\x08", b"\x04"),
     "I;16": ("I;16B", b"\x10", b"\x00"),
     "I;16B": ("I;16B", b"\x10", b"\x00"),
@@ -1131,6 +1137,31 @@ _OUTMODES = {
     "RGB": ("RGB", b"\x08", b"\x02"),
     "RGBA": ("RGBA", b"\x08", b"\x06"),
 }
+
+
+_PNG_BITS = (1, 2, 4, 8)
+
+
+def _valid_bits(bits: Any) -> int:
+    try:
+        bits = operator.index(bits)
+    except TypeError as e:
+        msg = "invalid bits; bits must be 1, 2, 4, or 8"
+        raise ValueError(msg) from e
+    if bits not in _PNG_BITS:
+        msg = f"invalid bits {bits!r}; bits must be 1, 2, 4, or 8"
+        raise ValueError(msg)
+    return bits
+
+
+def _quantize_l_for_png(im: Image.Image, bits: int) -> Image.Image:
+    """Return a P image containing packed grayscale sample indices."""
+    max_sample = (1 << bits) - 1
+    # PNG readers expand low-bit grayscale samples by multiplying by
+    # 255 / max_sample.  Quantize to the nearest of those output levels.
+    table = tuple((value * max_sample + 127) // 255 for value in range(256))
+    quantized = im.point(table)
+    return Image.frombytes("P", quantized.size, quantized.tobytes())
 
 
 def putchunk(fp: IO[bytes], cid: bytes, *data: bytes) -> None:
@@ -1271,11 +1302,13 @@ def _write_multiple_frames(
     # default image IDAT (if it exists)
     if default_image:
         default_im = im if im.mode == mode else im.convert(mode)
+        if mode == "L" and rawmode.startswith("P;"):
+            default_im = _quantize_l_for_png(default_im, int(rawmode.partition(";")[2]))
         _apply_encoderinfo(default_im, im.encoderinfo)
         ImageFile._save(
             default_im,
             cast("IO[bytes]", _idat(fp, chunk)),
-            [ImageFile._Tile("zip", (0, 0) + im.size, 0, rawmode)],
+            [ImageFile._Tile("zip", (0, 0) + default_im.size, 0, rawmode)],
         )
 
     seq_num = 0
@@ -1311,20 +1344,23 @@ def _write_multiple_frames(
         )
         seq_num += 1
         # frame data
-        _apply_encoderinfo(im_frame, im.encoderinfo)
+        frame_raw = im_frame
+        if mode == "L" and rawmode.startswith("P;"):
+            frame_raw = _quantize_l_for_png(im_frame, int(rawmode.partition(";")[2]))
+        _apply_encoderinfo(frame_raw, im.encoderinfo)
         if frame == 0 and not default_image:
             # first frame must be in IDAT chunks for backwards compatibility
             ImageFile._save(
-                im_frame,
+                frame_raw,
                 cast("IO[bytes]", _idat(fp, chunk)),
-                [ImageFile._Tile("zip", (0, 0) + im_frame.size, 0, rawmode)],
+                [ImageFile._Tile("zip", (0, 0) + frame_raw.size, 0, rawmode)],
             )
         else:
             fdat_chunks = _fdat(fp, chunk, seq_num)
             ImageFile._save(
-                im_frame,
+                frame_raw,
                 cast("IO[bytes]", fdat_chunks),
-                [ImageFile._Tile("zip", (0, 0) + im_frame.size, 0, rawmode)],
+                [ImageFile._Tile("zip", (0, 0) + frame_raw.size, 0, rawmode)],
             )
             seq_num = fdat_chunks.seq_num
     return None
@@ -1387,12 +1423,14 @@ def _save(
             palette_frame_with_alpha = im if im.palette.mode == "RGBA" else None
 
     outmode = mode
+    bits = im.encoderinfo.get("bits", 8)
     if mode == "P":
         #
         # attempt to minimize storage requirements for palette images
         if "bits" in im.encoderinfo:
+            bits = _valid_bits(bits)
             # number of bits specified by user
-            colors = min(1 << im.encoderinfo["bits"], 256)
+            colors = min(1 << bits, 256)
         else:
             # check palette contents
             if palette:
@@ -1407,6 +1445,10 @@ def _save(
                 bits = 2
             else:
                 bits = 4
+            outmode += f";{bits}"
+    elif mode == "L":
+        bits = _valid_bits(bits)
+        if bits != 8:
             outmode += f";{bits}"
 
     # get the corresponding PNG mode
@@ -1544,11 +1586,14 @@ def _save(
             im, fp, chunk, mode, rawmode, default_image, append_images
         )
     if single_im:
-        _apply_encoderinfo(single_im, im.encoderinfo)
+        save_im = single_im
+        if mode == "L" and bits != 8:
+            save_im = _quantize_l_for_png(single_im, bits)
+        _apply_encoderinfo(save_im, im.encoderinfo)
         ImageFile._save(
-            single_im,
+            save_im,
             cast("IO[bytes]", _idat(fp, chunk)),
-            [ImageFile._Tile("zip", (0, 0) + single_im.size, 0, rawmode)],
+            [ImageFile._Tile("zip", (0, 0) + save_im.size, 0, rawmode)],
         )
 
     if info:
