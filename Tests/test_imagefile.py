@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from io import BytesIO
 from typing import Any
 
@@ -24,6 +26,10 @@ from .helper import (
     skip_unless_feature,
     tostring,
 )
+
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # save original block sizes
 MAXBLOCK = ImageFile.MAXBLOCK
@@ -293,11 +299,74 @@ class MockImageFile(ImageFile.ImageFile):
         ]
 
 
+class ControlledPyEncoder(ImageFile.PyEncoder):
+    """Encoder returning buffers that are longer than the encoded prefix."""
+
+    def __init__(self, mode: str, *args: Any) -> None:
+        super().__init__(mode, *args)
+        self.chunks: list[tuple[int, int, bytes]] = []
+        self.calls: list[int] = []
+
+    def encode(self, bufsize: int) -> tuple[int, int, bytes]:
+        self.calls.append(bufsize)
+        return self.chunks[len(self.calls) - 1]
+
+
+class RecordingOS:
+    """Stand-in for the ``os`` module used by ``encode_to_file()``."""
+
+    def __init__(self, limit: int | None = None, result: int | None = None) -> None:
+        self.limit = limit
+        self.result = result
+        self.calls: list[bytes] = []
+
+    def write(self, fh: int, data: Any) -> int:
+        payload = bytes(data)
+        if self.limit is not None:
+            payload = payload[: self.limit]
+        self.calls.append(payload)
+        if self.result is not None:
+            return self.result
+        return os.write(fh, payload)
+
+
+class PrefixPyEncoder(ImageFile.PyEncoder):
+    """Splits the supplied raw bytes into chunks and pads each returned buffer."""
+
+    chunk_size = 7
+
+    def __init__(self, mode: str, *args: Any) -> None:
+        super().__init__(mode, *args)
+        self._data: bytes | None = None
+        self._offset = 0
+        self.chunk_lengths: list[int] = []
+
+    def encode(self, bufsize: int) -> tuple[int, int, bytes]:
+        if self._data is None:
+            (self._data,) = self.args
+        chunk = self._data[self._offset : self._offset + self.chunk_size]
+        self._offset += len(chunk)
+        self.chunk_lengths.append(len(chunk))
+        errcode = 1 if self._offset >= len(self._data) else 0
+        # The buffer is deliberately longer than the encoded prefix.
+        return len(chunk), errcode, chunk + b"\xff" * 5
+
+
+def _save_prefix(im: Image.Image, fp: Any, filename: str | bytes) -> None:
+    fp.write(b"HEAD")
+    ImageFile._save(
+        im, fp, [ImageFile._Tile("PREFIX", (0, 0) + im.size, 0, im.tobytes())]
+    )
+
+
 class CodecsTest:
     @classmethod
     def setup_class(cls) -> None:
         Image.register_decoder("MOCK", MockPyDecoder)
         Image.register_encoder("MOCK", MockPyEncoder)
+        Image.register_encoder("PREFIX", PrefixPyEncoder)
+        Image.register_save("PREFIX", _save_prefix)
+        Image.register_extension("PREFIX", ".prefix")
 
 
 class TestPyDecoder(CodecsTest):
@@ -435,6 +504,155 @@ class TestPyEncoder(CodecsTest):
 
         with pytest.raises(NotImplementedError):
             encoder.encode_to_file(0, 0)
+
+    def test_encode_to_file_writes_prefix(self) -> None:
+        encoder = ControlledPyEncoder("")
+        encoder.chunks = [
+            # A buffer that is longer than the encoded prefix.
+            (3, 0, b"abcXXXX"),
+            (2, 0, b"deYYY"),
+            # The final chunk ends encoding.
+            (1, 1, b"fZZZ"),
+        ]
+
+        with tempfile.TemporaryFile() as fp:
+            assert encoder.encode_to_file(fp.fileno(), 1) == 1
+            fp.seek(0)
+            assert fp.read() == b"abcdef"
+        assert encoder.calls == [1, 1, 1]
+
+    def test_encode_to_pyfd_writes_prefix(self) -> None:
+        class PushesFdEncoder(ControlledPyEncoder):
+            _pushes_fd = True
+
+        encoder = PushesFdEncoder("")
+        encoder.chunks = [(3, 1, b"abcXXXX")]
+
+        fp = BytesIO()
+        encoder.setfd(fp)
+        assert encoder.encode_to_pyfd() == (3, 1)
+        assert fp.getvalue() == b"abc"
+
+    def test_encode_to_file_short_write(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        encoder = ControlledPyEncoder("")
+        encoder.chunks = [(6, 1, b"abcdefZ")]
+
+        recorder = RecordingOS(limit=2)
+        monkeypatch.setattr(ImageFile, "os", recorder)
+
+        with tempfile.TemporaryFile() as fp:
+            assert encoder.encode_to_file(fp.fileno(), 1) == 1
+            fp.seek(0)
+            assert fp.read() == b"abcdef"
+        assert recorder.calls == [b"ab", b"cd", b"ef"]
+
+    def test_encode_to_file_zero_length(self) -> None:
+        encoder = ControlledPyEncoder("")
+        encoder.chunks = [(0, 0, b"XXX")]
+
+        with tempfile.TemporaryFile() as fp:
+            with pytest.raises(OSError, match="encoder returned no data"):
+                encoder.encode_to_file(fp.fileno(), 1)
+        # The empty chunk is rejected rather than looping forever.
+        assert encoder.calls == [1]
+
+    def test_encode_to_file_negative_length(self) -> None:
+        encoder = ControlledPyEncoder("")
+        encoder.chunks = [(-1, 0, b"XXX")]
+
+        with tempfile.TemporaryFile() as fp:
+            with pytest.raises(OSError, match="negative number of bytes"):
+                encoder.encode_to_file(fp.fileno(), 1)
+        assert encoder.calls == [1]
+
+    def test_encode_to_file_negative_length_with_error(self) -> None:
+        encoder = ControlledPyEncoder("")
+        encoder.chunks = [(-1, -1, b"XXX")]
+
+        with tempfile.TemporaryFile() as fp:
+            assert encoder.encode_to_file(fp.fileno(), 1) == -1
+            fp.seek(0)
+            assert fp.read() == b""
+        assert encoder.calls == [1]
+
+    def test_encode_to_file_write_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        encoder = ControlledPyEncoder("")
+        encoder.chunks = [(6, 1, b"abcdefZ")]
+
+        monkeypatch.setattr(ImageFile, "os", RecordingOS(result=0))
+        with tempfile.TemporaryFile() as fp:
+            with pytest.raises(OSError, match="unable to write to file"):
+                encoder.encode_to_file(fp.fileno(), 1)
+
+    def test_encode_to_file_multiple_chunks(self) -> None:
+        encoder = ControlledPyEncoder("")
+        encoder.chunks = [
+            (4, 0, b"abcdXXXX"),
+            (0, 0, b"YYYY"),  # empty chunk with no error code is rejected
+        ]
+
+        with tempfile.TemporaryFile() as fp:
+            with pytest.raises(OSError, match="encoder returned no data"):
+                encoder.encode_to_file(fp.fileno(), 1)
+            fp.seek(0)
+            # The empty chunk is rejected rather than looping forever.
+            assert fp.read() == b"abcd"
+
+    def test_encode_to_file_matches_memory(self, tmp_path: Path) -> None:
+        im = hopper("RGB")
+
+        path = tmp_path / "hopper.prefix"
+        im.save(path)
+
+        with open(path, "rb") as fp:
+            file_data = fp.read()
+
+        assert file_data == b"HEAD" + im.tobytes()
+
+        # The same encoder used in memory produces the same bytes.
+        encoder = Image._getencoder("RGB", "PREFIX", im.tobytes())
+        chunks = []
+        calls = []
+        while True:
+            bytes_consumed, errcode, data = encoder.encode(0)
+            calls.append(bytes_consumed)
+            chunks.append(data[:bytes_consumed])
+            if errcode:
+                break
+        assert b"".join(chunks) == im.tobytes()
+        assert sum(calls) == len(im.tobytes())
+
+    def test_encode_to_file_chunk_boundaries(self, tmp_path: Path) -> None:
+        im = Image.new("L", (3, 2), 0)
+        im.putdata([1, 2, 3, 4, 5, 6])
+
+        path = tmp_path / "small.prefix"
+        im.save(path, "PREFIX")
+
+        with open(path, "rb") as fp:
+            assert fp.read() == b"HEAD" + bytes([1, 2, 3, 4, 5, 6])
+
+        # The padding each encoder call adds must not reach the file.
+        assert len(im.tobytes()) % PrefixPyEncoder.chunk_size != 0
+
+    def test_encode_to_file_python_matches_c(self, tmp_path: Path) -> None:
+        # The C path writes with write(2) while the Python path uses os.write().
+        # Both must produce the same bytes for the same encoder.
+        im = hopper("RGB")
+
+        path = tmp_path / "hopper.tga"
+        im.save(path, "TGA")
+
+        with open(path, "rb") as fp:
+            file_data = fp.read()
+
+        # The TGA encoder writes through the C ``encode_to_file``.
+        assert file_data[:3] == b"\x00\x00\x02"
+
+        # A BytesIO has no fileno(), so the Python ``encode()`` loop is used.
+        fp = BytesIO()
+        im.save(fp, "TGA")
+        assert fp.getvalue() == file_data
 
     def test_zero_height(self) -> None:
         with pytest.raises(UnidentifiedImageError):

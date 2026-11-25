@@ -640,6 +640,17 @@ class Parser:
 # --------------------------------------------------------------------
 
 
+def _valid_chunk(bytes_consumed: int, data: bytes) -> memoryview:
+    """Return the part of an encoder's output that it actually encoded.
+
+    Encoders may return a buffer that is longer than the number of bytes they
+    encoded, so only the first ``bytes_consumed`` bytes may be written.  A
+    negative length has no bytes to write.  A view is returned, so that a long
+    buffer is not copied before it is written.
+    """
+    return memoryview(data)[: max(bytes_consumed, 0)]
+
+
 def _save(im: Image.Image, fp: IO[bytes], tile: list[_Tile], bufsize: int = 0) -> None:
     """Helper to save image based on tile list
 
@@ -689,8 +700,8 @@ def _encode_tile(
                 if exc:
                     # compress to Python file-compatible object
                     while True:
-                        errcode, data = encoder.encode(bufsize)[1:]
-                        fp.write(data)
+                        bytes_consumed, errcode, data = encoder.encode(bufsize)
+                        fp.write(_valid_chunk(bytes_consumed, data))
                         if errcode:
                             break
                 else:
@@ -917,7 +928,8 @@ class PyEncoder(PyCodec):
         bytes_consumed, errcode, data = self.encode(0)
         if data:
             assert self.fd is not None
-            self.fd.write(data)
+            # Only the reported prefix of the returned buffer is valid.
+            self.fd.write(_valid_chunk(bytes_consumed, data))
         return bytes_consumed, errcode
 
     def encode_to_file(self, fh: int, bufsize: int) -> int:
@@ -928,10 +940,31 @@ class PyEncoder(PyCodec):
         :returns: If finished successfully, return 0.
             Otherwise, return an error code. Err codes are from
             :data:`.ImageFile.ERRORS`.
+        :exception OSError: If the encoder reports an invalid number of bytes
+            or the file cannot be written to.
         """
         errcode = 0
         while errcode == 0:
-            status, errcode, buf = self.encode(bufsize)
-            if status > 0:
-                os.write(fh, buf[status:])
+            bytes_consumed, errcode, buf = self.encode(bufsize)
+            if bytes_consumed < 0:
+                if errcode != 0:
+                    break
+                msg = "encoder returned a negative number of bytes"
+                raise OSError(msg)
+            if bytes_consumed == 0:
+                # Without an error code, an empty chunk would loop forever,
+                # since the encoder has not reported that it is finished.
+                if errcode != 0:
+                    break
+                msg = "encoder returned no data"
+                raise OSError(msg)
+            # Encoders may return a buffer longer than the number of bytes they
+            # encoded, so only write the prefix that they reported.
+            data = _valid_chunk(bytes_consumed, buf)
+            while data:
+                written = os.write(fh, data)
+                if written <= 0:
+                    msg = "unable to write to file"
+                    raise OSError(msg)
+                data = data[written:]
         return errcode

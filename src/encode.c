@@ -30,6 +30,8 @@
 #include "libImaging/Bcn.h"
 #include "libImaging/Gif.h"
 
+#include <errno.h>
+
 #ifdef HAVE_UNISTD_H
 #include <unistd.h> /* write */
 #endif
@@ -173,7 +175,7 @@ _encode_to_pyfd(ImagingEncoderObject *encoder, PyObject *args) {
 static PyObject *
 _encode_to_file(ImagingEncoderObject *encoder, PyObject *args) {
     UINT8 *buf;
-    int status;
+    int bytes_consumed;
     ImagingSectionCookie cookie;
 
     /* Encode to a file handle */
@@ -198,14 +200,59 @@ _encode_to_file(ImagingEncoderObject *encoder, PyObject *args) {
         /* This replaces the inner loop in the ImageFile _save
            function. */
 
-        status = encoder->encode(encoder->im, &encoder->state, buf, bufsize);
+        int offset;
 
-        if (status > 0) {
-            if (write(fh, buf, status) < 0) {
+        bytes_consumed = encoder->encode(encoder->im, &encoder->state, buf, bufsize);
+
+        if (bytes_consumed < 0) {
+            if (encoder->state.errcode == 0) {
+                ImagingSectionLeave(&cookie);
+                free(buf);
+                PyErr_SetString(
+                    PyExc_OSError, "encoder returned a negative number of bytes"
+                );
+                return NULL;
+            }
+            break;
+        }
+        if (bytes_consumed > bufsize) {
+            ImagingSectionLeave(&cookie);
+            free(buf);
+            PyErr_SetString(PyExc_OSError, "encoder returned more bytes than its buffer");
+            return NULL;
+        }
+        if (bytes_consumed == 0) {
+            /* Without an error code, an empty chunk would loop forever, since
+               the encoder has not reported that it is finished. */
+            if (encoder->state.errcode == 0) {
+                ImagingSectionLeave(&cookie);
+                free(buf);
+                PyErr_SetString(PyExc_OSError, "encoder returned no data");
+                return NULL;
+            }
+            break;
+        }
+
+        /* write() may write fewer bytes than requested, so keep going until
+           the whole chunk has been written */
+        for (offset = 0; offset < bytes_consumed;) {
+            Py_ssize_t written =
+                write(fh, buf + offset, (size_t)(bytes_consumed - offset));
+            if (written < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
                 ImagingSectionLeave(&cookie);
                 free(buf);
                 return PyErr_SetFromErrno(PyExc_OSError);
             }
+            if (written == 0) {
+                ImagingSectionLeave(&cookie);
+                free(buf);
+                PyErr_SetString(PyExc_OSError, "unable to write to file");
+                return NULL;
+            }
+            offset += (int)written;
         }
 
     } while (encoder->state.errcode == 0);
