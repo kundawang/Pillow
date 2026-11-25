@@ -268,3 +268,10 @@ Fixed opening XBM images with comments
 
 XBM images with C-style ``/* ... */`` comments in the header could not be identified.
 Comments on separate lines before the bits declaration are now skipped.
+
+Faster ``Image.point()``
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+:py:meth:`~PIL.Image.Image.point` lookup tables and integer/floating-point linear
+transforms now avoid redundant destination-buffer initialization and use tighter C
+loops. Padding bytes in LA and RGB images are still initialized to zero.
