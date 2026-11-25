@@ -398,3 +398,159 @@ def test_save_xmp() -> None:
 
     # Test that encoderinfo is unchanged
     assert im2.encoderinfo == {"xmp": b"Second frame"}
+
+
+def _mp_entries(data: bytes) -> tuple[int, list[dict[str, Any]]]:
+    # Parse the MP Index IFD straight from the MPF APP2 payload.
+    mpf_offset = data.find(b"MPF\0") + 4
+    with Image.open(BytesIO(data)) as im:
+        assert isinstance(im, MpoImagePlugin.MpoImageFile)
+        mpinfo = im._getmp()
+    assert mpinfo is not None
+    return mpf_offset, mpinfo[0xB002]
+
+
+def test_save_all_three_frames() -> None:
+    # Three frames with clearly distinct colors and different sizes, so a
+    # wrong frame size or offset cannot be hidden by identical JPEG output.
+    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+    sizes = [(64, 64), (48, 48), (32, 96)]
+    frames = [Image.new("RGB", size, color) for size, color in zip(sizes, colors)]
+
+    out = BytesIO()
+    frames[0].save(out, "MPO", save_all=True, append_images=frames[1:])
+    data = out.getvalue()
+
+    mpf_offset, entries = _mp_entries(data)
+    assert len(entries) == 3
+
+    # Frame 0 starts at the SOI; every later frame is located through its
+    # DataOffset, which is relative to the MP Index IFD.
+    frame_offsets = [0] + [mpf_offset + entry["DataOffset"] for entry in entries[1:]]
+    for index, offset in enumerate(frame_offsets):
+        assert data[offset : offset + 2] == b"\xff\xd8"  # SOI marker
+
+    # Each MP entry must describe exactly its own JPEG.
+    frame_ends = [*frame_offsets[1:], len(data)]
+    for entry, offset, end in zip(entries, frame_offsets, frame_ends):
+        assert entry["Size"] == end - offset
+
+    # Frame 0 has a zero DataOffset, as required by CIPA DC-007.
+    assert entries[0]["DataOffset"] == 0
+
+    with Image.open(BytesIO(data)) as reloaded:
+        assert isinstance(reloaded, MpoImagePlugin.MpoImageFile)
+        assert reloaded.n_frames == 3
+        assert reloaded.is_animated
+
+        # Sequential iteration, then out-of-order seeks must all agree.
+        for order in (range(3), (2, 0, 1), (1,)):
+            for index in order:
+                reloaded.seek(index)
+                assert reloaded.tell() == index
+                assert reloaded.mode == "RGB"
+                assert reloaded.size == sizes[index]
+                reloaded.load()
+                assert_image_similar(reloaded, frames[index], 3)
+
+
+@pytest.mark.parametrize(
+    "modes",
+    [
+        ["CMYK", "CMYK", "RGB"],
+        ["CMYK", "RGB"],
+        ["RGB", "CMYK"],
+        ["L", "RGB"],
+    ],
+)
+def test_save_all_mixed_modes(modes: list[str]) -> None:
+    frames = [Image.new(mode, (32, 32)) for mode in modes]
+
+    out = BytesIO()
+    frames[0].save(out, "MPO", save_all=True, append_images=frames[1:])
+    data = out.getvalue()
+
+    mpf_offset, entries = _mp_entries(data)
+    assert len(entries) == len(frames)
+    frame_offsets = [0] + [mpf_offset + entry["DataOffset"] for entry in entries[1:]]
+    frame_ends = [*frame_offsets[1:], len(data)]
+
+    # Every individual JPEG reopens on its own with the expected mode, proving
+    # each frame was encoded using its own mode rather than the first frame's.
+    for index, (offset, end, mode) in enumerate(
+        zip(frame_offsets, frame_ends, modes),
+    ):
+        with Image.open(BytesIO(data[offset:end])) as standalone:
+            standalone.load()
+            assert standalone.mode == mode
+
+    with Image.open(BytesIO(data)) as reloaded:
+        assert reloaded.n_frames == len(frames)
+        for index, mode in enumerate(modes):
+            reloaded.seek(index)
+            reloaded.load()
+            assert reloaded.mode == mode
+
+
+def test_save_all_keep_rgb() -> None:
+    # An RGBX primary needs keep_rgb to stay RGB, while the plain RGB second
+    # frame must simply be encoded on its own terms.
+    frames = [
+        Image.new("RGBX", (32, 32), (255, 0, 0, 255)),
+        Image.new("RGB", (32, 32), (0, 0, 255)),
+    ]
+
+    out = BytesIO()
+    frames[0].save(
+        out,
+        "MPO",
+        save_all=True,
+        append_images=frames[1:],
+        keep_rgb=True,
+    )
+
+    with Image.open(BytesIO(out.getvalue())) as reloaded:
+        assert reloaded.n_frames == 2
+        reloaded.load()
+        assert reloaded.mode == "RGB"
+        reloaded.seek(1)
+        reloaded.load()
+        assert reloaded.mode == "RGB"
+        assert reloaded.getpixel((0, 0))[2] > 250
+
+
+def test_save_all_invalid_mode() -> None:
+    for invalid_mode in ("P", "RGBA", "LA", "I", "F"):
+        out = BytesIO()
+        with pytest.raises(OSError, match="cannot write mode"):
+            Image.new("RGB", (32, 32)).save(
+                out,
+                "MPO",
+                save_all=True,
+                append_images=[Image.new(invalid_mode, (32, 32))],
+            )
+
+    # An unsupported primary image fails the same way.
+    with pytest.raises(OSError, match="cannot write mode RGBA as JPEG"):
+        Image.new("RGBA", (32, 32)).save(
+            BytesIO(),
+            "MPO",
+            save_all=True,
+            append_images=[Image.new("RGB", (32, 32))],
+        )
+
+
+def test_save_all_encoderinfo_restored() -> None:
+    frames = [Image.new("RGB", (16, 16)) for _ in range(3)]
+    frames[1].encoderinfo = {"quality": 50}
+
+    out = BytesIO()
+    frames[0].save(out, "MPO", save_all=True, append_images=frames[1:])
+
+    # Saving must not leave temporary encoder settings (e.g. the MP marker)
+    # on the caller's images.
+    assert not hasattr(frames[0], "encoderinfo") or (
+        "extra" not in frames[0].encoderinfo
+    )
+    assert frames[1].encoderinfo == {"quality": 50}
+    assert not hasattr(frames[2], "encoderinfo")

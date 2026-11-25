@@ -280,3 +280,22 @@ FriBiDi itself is not included in Pillow's wheels.
 
 The shim's source files now include SPDX license identifiers, and the SBOM has been
 corrected.
+
+Fixed writing multi-frame MPO images
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When an MPO image contained more than two frames, the MP Index recorded the wrong
+sizes and offsets from the third frame onwards, because each frame's size was
+measured relative to the previous frame instead of from the start of the file.
+Frames beyond the second could then be unreadable by stricter readers.
+
+The position of the MP Index was also assumed to be a fixed offset, which only held
+for RGB JPEGs. Images whose first frame used another mode, such as CMYK or RGB with
+``keep_rgb``, placed the marker elsewhere, so the index was written at the wrong
+position and the resulting file was not a valid MPO.
+
+Each frame is now encoded as an independent JPEG using its own mode and encoder
+settings, the MP Index is located by reading the written marker rather than by
+assuming an offset, and every MP entry gives that frame's own size and a
+specification-correct data offset. Frames that cannot be written as JPEG now raise a
+clear ``OSError`` before any data is written.

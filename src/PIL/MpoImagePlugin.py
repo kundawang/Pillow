@@ -50,50 +50,85 @@ def _save_all(im: Image.Image, fp: IO[bytes], filename: str | bytes) -> None:
         _save(im, fp, filename)
         return
 
-    mpf_offset = 28
-    offsets: list[int] = []
-    im_sequences = [im, *append_images]
-    total = sum(getattr(seq, "n_frames", 1) for seq in im_sequences)
-    for im_sequence in im_sequences:
+    # Every frame is encoded as an independent JPEG, using its own mode and
+    # its own encoder settings rather than those of the first frame. The
+    # iterator returns the same image object for every frame of a sequence,
+    # so each frame is copied to keep it independent of later seeks.
+    frames: list[Image.Image] = []
+    frame_encoderinfo: list[dict[str, Any]] = []
+    for im_sequence in [im, *append_images]:
         for im_frame in ImageSequence.Iterator(im_sequence):
-            if not offsets:
-                # APP2 marker
-                ifd_length = 66 + 16 * total
-                im_frame.encoderinfo["extra"] = (
-                    b"\xff\xe2"
-                    + struct.pack(">H", 6 + ifd_length)
-                    + b"MPF\0"
-                    + b" " * ifd_length
-                )
-                if exif := im_frame.encoderinfo.get("exif"):
-                    if isinstance(exif, Image.Exif):
-                        exif = exif.tobytes()
-                        im_frame.encoderinfo["exif"] = exif
-                    mpf_offset += 4 + len(exif)
+            # Capture the frame's own encoder settings before copying, since
+            # the copy does not carry the encoderinfo attribute.
+            frame_encoderinfo.append(getattr(im_frame, "encoderinfo", {}))
+            im_frame = im_frame.copy()
+            # Validate up front that every frame can be written as JPEG,
+            # so an invalid combination fails before any data is written.
+            if im_frame.mode not in JpegImagePlugin.RAWMODE:
+                msg = f"cannot write mode {im_frame.mode} as JPEG"
+                raise OSError(msg)
+            frames.append(im_frame)
 
-                JpegImagePlugin._save(im_frame, fp, filename)
-                offsets.append(fp.tell())
-            else:
-                encoderinfo = im_frame._attach_default_encoderinfo(im)
-                im_frame.save(fp, "JPEG")
-                im_frame.encoderinfo = encoderinfo
-                offsets.append(fp.tell() - offsets[-1])
+    # The MP Index is carried in an APP2 marker of the first JPEG. The marker
+    # is initially written as padding and overwritten in place once all frame
+    # sizes and offsets are known.
+    total = len(frames)
+    ifd_length = 66 + 16 * total
+    extra = (
+        b"\xff\xe2"
+        + struct.pack(">H", 6 + ifd_length)
+        + b"MPF\0"
+        + b" " * ifd_length
+    )
+
+    # End position of every frame in the output file. The SOI of the first
+    # frame is at 0 and every later frame starts where the previous one ended.
+    frame_ends: list[int] = []
+    try:
+        for index, im_frame in enumerate(frames):
+            # Restore the frame's own settings, then merge the save options
+            # on top. The frame's own settings take precedence.
+            im_frame.encoderinfo = frame_encoderinfo[index]
+            im_frame._attach_default_encoderinfo(im)
+            if index == 0:
+                im_frame.encoderinfo = {**im_frame.encoderinfo, "extra": extra}
+            JpegImagePlugin._save(im_frame, fp, filename)
+            frame_ends.append(fp.tell())
+    finally:
+        for im_frame, encoderinfo in zip(frames, frame_encoderinfo):
+            im_frame.encoderinfo = encoderinfo
+
+    # Absolute position of each frame's SOI marker in the output file.
+    frame_offsets = [0, *frame_ends[:-1]]
+
+    # Position of the MP Index IFD, i.e. the TIFF header at the start of the
+    # MPF APP2 payload. This is measured rather than assumed, because the
+    # markers preceding it depend on the first frame's mode (e.g. CMYK JPEGs
+    # carry an APP14 marker instead of a JFIF APP0 marker).
+    fp.seek(0)
+    first_frame = fp.read(frame_ends[0])
+    mpf_marker = first_frame.find(b"MPF\0")
+    if mpf_marker < 0:
+        msg = "failed to write MP index marker"
+        raise OSError(msg)
+    mpf_offset = mpf_marker + 4
+
+    # Size of each individual JPEG, in bytes.
+    frame_sizes = [frame_ends[i] - frame_offsets[i] for i in range(total)]
 
     ifd = TiffImagePlugin.ImageFileDirectory_v2()
     ifd[0xB000] = b"0100"
-    ifd[0xB001] = len(offsets)
+    ifd[0xB001] = total
 
+    # Per the CIPA DC-007 specification, the first image has a DataOffset of
+    # zero and every later DataOffset is relative to the MP Index IFD.
     mpentries = b""
-    data_offset = 0
-    for i, size in enumerate(offsets):
-        if i == 0:
-            mptype = 0x030000  # Baseline MP Primary Image
-        else:
-            mptype = 0x000000  # Undefined
-        mpentries += struct.pack("<LLLHH", mptype, size, data_offset, 0, 0)
-        if i == 0:
-            data_offset -= mpf_offset
-        data_offset += size
+    for i in range(total):
+        mptype = 0x030000 if i == 0 else 0x000000  # Baseline MP Primary / Undefined
+        data_offset = 0 if i == 0 else frame_offsets[i] - mpf_offset
+        mpentries += struct.pack(
+            "<LLLHH", mptype, frame_sizes[i], data_offset, 0, 0
+        )
     ifd[0xB002] = mpentries
 
     fp.seek(mpf_offset)
