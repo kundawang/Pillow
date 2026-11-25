@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import gzip
 import math
+import zlib
 
 from . import Image, ImageFile
 
@@ -66,7 +67,10 @@ class FitsImageFile(ImageFile.ImageFile):
             msg = "No image data"
             raise ValueError(msg)
 
-        offset += self.fp.tell() - 80
+        # The data unit begins where the card that ended the header began.
+        # Use the number of bytes actually read, since a truncated file can
+        # end the final card early.
+        offset += self.fp.tell() - len(header)
         self.tile = [ImageFile._Tile(decoder_name, (0, 0) + self.size, offset, args)]
 
     def _get_size(
@@ -107,17 +111,27 @@ class FitsImageFile(ImageFile.ImageFile):
 
         number_of_bits = int(headers[prefix + b"BITPIX"])
         if number_of_bits == 8:
-            self._mode = "L"
+            self._mode = rawmode = "L"
         elif number_of_bits == 16:
             self._mode = "I;16"
+            rawmode = "I;16B"
         elif number_of_bits == 32:
             self._mode = "I"
-        elif number_of_bits in (-32, -64):
+            rawmode = "I;32B"
+        elif number_of_bits == -32 or (decoder_name == "raw" and number_of_bits == -64):
             self._mode = "F"
+            rawmode = f"F;{-number_of_bits}BF"
+        else:
+            msg = "Unsupported number of bits"
+            raise OSError(msg)
 
         args: tuple[str | int, ...]
         if decoder_name == "raw":
-            args = (self.mode, 0, -1)
+            # FITS stores multi-byte values in big-endian byte order, and
+            # integer values are signed (except for 8-bit data). Using an
+            # explicit raw mode lets the decoder convert them instead of
+            # assuming the data is already in the native byte order.
+            args = (rawmode, 0, -1)
         else:
             args = (number_of_bits,)
         return decoder_name, offset, args
@@ -128,19 +142,30 @@ class FitsGzipDecoder(ImageFile.PyDecoder):
 
     def decode(self, buffer: Image.DecoderInput) -> tuple[int, int]:
         assert self.fd is not None
+        number_of_bits = self.args[0]
+        number_of_bytes = abs(number_of_bits) // 8
         with gzip.open(self.fd) as fp:
-            value = fp.read(self.state.xsize * self.state.ysize * 4)
+            try:
+                value = fp.read(self.state.xsize * self.state.ysize * 4)
+            except EOFError as e:
+                msg = "Truncated FITS gzip data"
+                raise OSError(msg) from e
+            except zlib.error as e:
+                msg = "Corrupt FITS gzip data"
+                raise OSError(msg) from e
 
             rows = []
             offset = 0
-            number_of_bits = min(self.args[0] // 8, 4)
             for y in range(self.state.ysize):
                 row = bytearray()
                 for x in range(self.state.xsize):
-                    row += value[offset + (4 - number_of_bits) : offset + 4]
+                    # Each pixel occupies four bytes in the compressed data,
+                    # storing the value in big-endian byte order.
+                    row += value[offset + 4 - number_of_bytes : offset + 4]
                     offset += 4
                 rows.append(row)
-        self.set_as_raw(bytes([pixel for row in rows[::-1] for pixel in row]))
+        rawmode = {8: "L", 16: "I;16B", 32: "I;32B", -32: "F;32BF"}[number_of_bits]
+        self.set_as_raw(bytes([pixel for row in rows[::-1] for pixel in row]), rawmode)
         return -1, 0
 
 
