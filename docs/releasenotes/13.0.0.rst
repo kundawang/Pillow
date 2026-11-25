@@ -294,3 +294,11 @@ FriBiDi itself is not included in Pillow's wheels.
 
 The shim's source files now include SPDX license identifiers, and the SBOM has been
 corrected.
+
+Blurring I;16 images
+^^^^^^^^^^^^^^^^^^^^
+
+:py:class:`~PIL.ImageFilter.GaussianBlur` and :py:class:`~PIL.ImageFilter.BoxBlur`
+now support ``I;16``, ``I;16L``, ``I;16B`` and ``I;16N`` images, blurring at the
+original 16-bit precision rather than reducing the image to 8 bits first. Extreme
+values such as 0 and 65535 are preserved.

@@ -165,6 +165,112 @@ void static inline ImagingLineBoxBlur8(
 #undef SAVE
 }
 
+static int
+ImagingBoxBlurBigEndian(ModeID mode) {
+    /* I;16 always stores little-endian values, as does I;16L. */
+    if (mode == IMAGING_MODE_I_16B) {
+        return 1;
+    }
+#ifdef WORDS_BIGENDIAN
+    if (mode == IMAGING_MODE_I_16N) {
+        return 1;
+    }
+#endif
+    return 0;
+}
+
+/* Blur a single line of a 16-bit image at full precision.
+   Values are read from the image's byte order, accumulated in 64 bits, and
+   written back in the same byte order. */
+static inline void
+ImagingLineBoxBlur16(
+    UINT8 *lineOut,
+    UINT8 *lineIn,
+    int lastx,
+    int radius,
+    int edgeA,
+    int edgeB,
+    UINT32 ww,
+    UINT32 fw,
+    int bigendian
+) {
+    int x;
+    uint64_t acc;
+    uint64_t bulk;
+
+#define GET(x)                                         \
+    ((uint64_t)lineIn[(x) * 2 + (bigendian ? 1 : 0)] + \
+     ((uint64_t)lineIn[(x) * 2 + (bigendian ? 0 : 1)] << 8))
+
+#define MOVE_ACC(acc, subtract, add) (acc += GET(add) - GET(subtract))
+
+#define ADD_FAR(bulk, acc, left, right) \
+    ((bulk) = (acc * ww) + (GET(left) + GET(right)) * fw)
+
+#define SAVE(x, bulk)                                                 \
+    do {                                                              \
+        UINT16 value = (UINT16)((bulk + (1 << 23)) >> 24);            \
+        lineOut[(x) * 2 + (bigendian ? 1 : 0)] = (UINT8)value;        \
+        lineOut[(x) * 2 + (bigendian ? 0 : 1)] = (UINT8)(value >> 8); \
+    } while (0)
+
+    /* Compute acc for -1 pixel (outside of image):
+       From "-radius-1" to "-1" get first pixel,
+       then from "0" to "radius-1". */
+    acc = GET(0) * ((uint64_t)radius + 1);
+    /* As radius can be bigger than xsize, iterate to edgeA -1. */
+    for (x = 0; x < edgeA - 1; x++) {
+        acc += GET(x);
+    }
+    /* Then multiply remainder to last x. */
+    acc += GET(lastx) * ((uint64_t)radius - edgeA + 1);
+
+    if (edgeA <= edgeB) {
+        /* Subtract pixel from left ("0").
+           Add pixels from radius. */
+        for (x = 0; x < edgeA; x++) {
+            MOVE_ACC(acc, 0, x + radius);
+            ADD_FAR(bulk, acc, 0, x + radius + 1);
+            SAVE(x, bulk);
+        }
+        /* Subtract previous pixel from "-radius".
+           Add pixels from radius. */
+        for (x = edgeA; x < edgeB; x++) {
+            MOVE_ACC(acc, x - radius - 1, x + radius);
+            ADD_FAR(bulk, acc, x - radius - 1, x + radius + 1);
+            SAVE(x, bulk);
+        }
+        /* Subtract previous pixel from "-radius".
+           Add last pixel. */
+        for (x = edgeB; x <= lastx; x++) {
+            MOVE_ACC(acc, x - radius - 1, lastx);
+            ADD_FAR(bulk, acc, x - radius - 1, lastx);
+            SAVE(x, bulk);
+        }
+    } else {
+        for (x = 0; x < edgeB; x++) {
+            MOVE_ACC(acc, 0, x + radius);
+            ADD_FAR(bulk, acc, 0, x + radius + 1);
+            SAVE(x, bulk);
+        }
+        for (x = edgeB; x < edgeA; x++) {
+            MOVE_ACC(acc, 0, lastx);
+            ADD_FAR(bulk, acc, 0, lastx);
+            SAVE(x, bulk);
+        }
+        for (x = edgeA; x <= lastx; x++) {
+            MOVE_ACC(acc, x - radius - 1, lastx);
+            ADD_FAR(bulk, acc, x - radius - 1, lastx);
+            SAVE(x, bulk);
+        }
+    }
+
+#undef GET
+#undef MOVE_ACC
+#undef ADD_FAR
+#undef SAVE
+}
+
 Imaging
 ImagingHorizontalBoxBlur(Imaging imOut, Imaging imIn, float floatRadius) {
     ImagingSectionCookie cookie;
@@ -185,7 +291,26 @@ ImagingHorizontalBoxBlur(Imaging imOut, Imaging imIn, float floatRadius) {
 
     ImagingSectionEnter(&cookie);
 
-    if (imIn->image8) {
+    if (imIn->type == IMAGING_TYPE_I16) {
+        int bigendian = ImagingBoxBlurBigEndian(imIn->mode);
+        for (y = 0; y < imIn->ysize; y++) {
+            ImagingLineBoxBlur16(
+                (imIn == imOut ? (UINT8 *)lineOut : imOut->image8[y]),
+                imIn->image8[y],
+                imIn->xsize - 1,
+                radius,
+                edgeA,
+                edgeB,
+                ww,
+                fw,
+                bigendian
+            );
+            if (imIn == imOut) {
+                // Commit.
+                memcpy(imOut->image8[y], lineOut, imIn->linesize);
+            }
+        }
+    } else if (imIn->image8) {
         for (y = 0; y < imIn->ysize; y++) {
             ImagingLineBoxBlur8(
                 (imIn == imOut ? (UINT8 *)lineOut : imOut->image8[y]),
@@ -254,14 +379,15 @@ ImagingBoxBlur(Imaging imOut, Imaging imIn, float xradius, float yradius, int n)
         return ImagingError_Mismatch();
     }
 
-    if (imIn->type != IMAGING_TYPE_UINT8) {
-        return ImagingError_ModeError();
+    int supported = imIn->type == IMAGING_TYPE_I16;
+    if (!supported && imIn->type == IMAGING_TYPE_UINT8 &&
+        (imIn->mode == IMAGING_MODE_RGB || imIn->mode == IMAGING_MODE_RGBA ||
+         imIn->mode == IMAGING_MODE_RGBa || imIn->mode == IMAGING_MODE_RGBX ||
+         imIn->mode == IMAGING_MODE_CMYK || imIn->mode == IMAGING_MODE_L ||
+         imIn->mode == IMAGING_MODE_LA || imIn->mode == IMAGING_MODE_La)) {
+        supported = 1;
     }
-
-    if (imIn->mode != IMAGING_MODE_RGB && imIn->mode != IMAGING_MODE_RGBA &&
-        imIn->mode != IMAGING_MODE_RGBa && imIn->mode != IMAGING_MODE_RGBX &&
-        imIn->mode != IMAGING_MODE_CMYK && imIn->mode != IMAGING_MODE_L &&
-        imIn->mode != IMAGING_MODE_LA && imIn->mode != IMAGING_MODE_La) {
+    if (!supported) {
         return ImagingError_ModeError();
     }
 

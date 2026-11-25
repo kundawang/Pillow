@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import math
+import struct
+import sys
+from typing import Literal, cast
+
 import pytest
 
 from PIL import Image, ImageFilter
@@ -12,6 +17,97 @@ sample.putdata(sum([
     [220, 40,  230, 80,  130, 250, 40],
     [250, 0,   80,  30,  60,  20,  110],
 ], []))  # fmt: skip
+
+I16_MODES = ("I;16", "I;16L", "I;16B", "I;16N")
+
+
+def _float32(value: float) -> float:
+    return struct.unpack("f", struct.pack("f", value))[0]
+
+
+def _box_blur_weights(radius: float) -> tuple[int, int, int]:
+    # Mirror the fixed point weights computed in ImagingHorizontalBoxBlur(),
+    # including its single precision arithmetic.
+    integer_radius = int(radius)
+    ww = int(_float32(_float32(float(1 << 24)) / _float32(radius * 2.0 + 1.0)))
+    fw = ((1 << 24) - (integer_radius * 2 + 1) * ww) // 2
+    return integer_radius, ww, fw
+
+
+def _box_blur_line_reference(values: list[int], radius: float) -> list[int]:
+    """Reference box blur of one line, averaging with clamped edge extension."""
+    integer_radius, ww, fw = _box_blur_weights(radius)
+    last = len(values) - 1
+    result = []
+    for x in range(len(values)):
+        acc = sum(
+            values[min(max(i, 0), last)]
+            for i in range(x - integer_radius, x + integer_radius + 1)
+        )
+        left = values[min(max(x - integer_radius - 1, 0), last)]
+        right = values[min(max(x + integer_radius + 1, 0), last)]
+        bulk = acc * ww + (left + right) * fw
+        result.append((bulk + (1 << 23)) >> 24)
+    return result
+
+
+def _transpose(rows: list[list[int]]) -> list[list[int]]:
+    return [list(column) for column in zip(*rows)]
+
+
+def _box_blur_reference(
+    rows: list[list[int]], xradius: float, yradius: float, passes: int = 1
+) -> list[list[int]]:
+    """Reference for ImagingBoxBlur(): n horizontal passes in each direction."""
+    result = [list(row) for row in rows]
+    if xradius == 0 and yradius == 0:
+        return result
+    if xradius != 0:
+        for _ in range(passes):
+            result = [_box_blur_line_reference(row, xradius) for row in result]
+    if yradius != 0:
+        transposed = _transpose(result)
+        for _ in range(passes):
+            transposed = [_box_blur_line_reference(row, yradius) for row in transposed]
+        result = _transpose(transposed)
+    return result
+
+
+def _gaussian_blur_radius(radius: float, passes: int) -> float:
+    # Mirror _gaussian_blur_radius() in BoxBlur.c.
+    sigma2 = _float32(_float32(radius * radius) / _float32(passes))
+    length = _float32(math.sqrt(_float32(12.0 * sigma2 + 1.0)))
+    integer_part = _float32(math.floor(_float32(_float32(length - 1.0) / 2.0)))
+    l_term = _float32(integer_part * _float32(integer_part + 1))
+    numerator = _float32(
+        _float32(2 * integer_part + 1) * _float32(l_term - _float32(3 * sigma2))
+    )
+    denominator = _float32(
+        6 * _float32(sigma2 - _float32(_float32(integer_part + 1) ** 2))
+    )
+    return _float32(integer_part + _float32(numerator / denominator))
+
+
+def _gaussian_blur_reference(
+    rows: list[list[int]], xradius: float, yradius: float, passes: int = 3
+) -> list[list[int]]:
+    return _box_blur_reference(
+        rows,
+        _gaussian_blur_radius(xradius, passes),
+        _gaussian_blur_radius(yradius, passes),
+        passes,
+    )
+
+
+def _image_rows(im: Image.Image) -> list[list[int]]:
+    data = cast("tuple[int, ...]", im.get_flattened_data())
+    return [list(data[y * im.width : (y + 1) * im.width]) for y in range(im.height)]
+
+
+def _image_from_rows(rows: list[list[int]], mode: str) -> Image.Image:
+    im = Image.new(mode, (len(rows[0]), len(rows)))
+    im.putdata([value for row in rows for value in row])
+    return im
 
 
 def test_imageops_box_blur() -> None:
@@ -257,3 +353,95 @@ def test_three_passes() -> None:
         passes=3,
         delta=1,
     )
+
+
+@pytest.mark.parametrize("mode", I16_MODES)
+def test_i16_matches_l(mode: str) -> None:
+    # I;16 source data in the 0-255 range must blur exactly like L data.
+    for radius in (0, 0.02, 0.5, 1, 1.5, 3, 600):
+        for passes in (1, 2, 3):
+            reference = box_blur(sample, radius, passes)
+            result = box_blur(sample.convert(mode), radius, passes)
+            assert result.mode == mode
+            assert _image_rows(result) == _image_rows(reference)
+
+
+@pytest.mark.parametrize("mode", I16_MODES)
+@pytest.mark.parametrize(
+    "xradius, yradius, passes",
+    (
+        (1, 1, 1),
+        (0, 0, 1),
+        (0, 2, 1),
+        (2, 0, 1),
+        (0.5, 1.5, 1),
+        (2, 5, 1),
+        (1, 1, 2),
+        (1, 1, 3),
+        (3, 3, 2),
+        (10, 10, 1),
+        (600, 600, 1),
+        (600, 1, 3),
+    ),
+)
+def test_i16_reference(mode: str, xradius: float, yradius: float, passes: int) -> None:
+    rows = [
+        [0, 1, 255, 256, 1000],
+        [32767, 32768, 65534, 65535, 0],
+        [40000, 12345, 65535, 1, 999],
+    ]
+    im = _image_from_rows(rows, mode)
+    result = im._new(im.im.box_blur((xradius, yradius), passes))
+    assert _image_rows(result) == _box_blur_reference(rows, xradius, yradius, passes)
+
+
+@pytest.mark.parametrize("mode", I16_MODES)
+@pytest.mark.parametrize(
+    "xradius, yradius, passes",
+    ((1, 1, 3), (0, 2, 3), (2, 0, 3), (2, 5, 3), (0, 0, 3), (5, 1, 4)),
+)
+def test_i16_gaussian_reference(
+    mode: str, xradius: float, yradius: float, passes: int
+) -> None:
+    rows = [
+        [0, 1, 255, 256, 1000],
+        [32767, 32768, 65534, 65535, 0],
+        [40000, 12345, 65535, 1, 999],
+    ]
+    im = _image_from_rows(rows, mode)
+    result = im._new(im.im.gaussian_blur((xradius, yradius), passes))
+    assert _image_rows(result) == _gaussian_blur_reference(
+        rows, xradius, yradius, passes
+    )
+
+
+@pytest.mark.parametrize("mode", I16_MODES)
+@pytest.mark.parametrize("value", (0, 65535))
+def test_i16_extremes(mode: str, value: int) -> None:
+    im = Image.new(mode, sample.size, value)
+    for radius in (0, 1, 3, 600):
+        for blur in (ImageFilter.BoxBlur(radius), ImageFilter.GaussianBlur(radius)):
+            result = im.filter(blur)
+            assert result.mode == mode
+            assert result.tobytes() == im.tobytes()
+
+
+@pytest.mark.parametrize("mode", I16_MODES)
+def test_i16_byte_order(mode: str) -> None:
+    # Values straddle byte boundaries, so a byte swap would change the result.
+    values = [0, 1, 1000, 65534, 65535]
+    im = _image_from_rows([values], mode)
+    result = im._new(im.im.box_blur((1, 0), 1))
+    expected = _box_blur_reference([values], 1, 0)[0]
+    assert [result.getpixel((x, 0)) for x in range(5)] == expected
+    assert result.tobytes() == b"".join(
+        value.to_bytes(2, _byte_order(mode)) for value in expected
+    )
+
+
+def _byte_order(mode: str) -> Literal["big", "little"]:
+    if mode == "I;16B":
+        return "big"
+    if mode == "I;16N":
+        return sys.byteorder
+    return "little"
