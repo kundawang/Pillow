@@ -298,7 +298,9 @@ _decodeAsRGBA(Imaging im, ImagingCodecState state, TIFF *tiff) {
         ret = TIFFGetFieldDefaulted(tiff, TIFFTAG_ROWSPERSTRIP, &rows_per_block);
     }
 
-    if (ret != 1 || rows_per_block == (UINT32)(-1)) {
+    if (ret != 1 || rows_per_block == (UINT32)(-1) ||
+        rows_per_block > (UINT32)state->ysize) {
+        // No more than the image height is needed for the buffer
         rows_per_block = state->ysize;
     }
 
@@ -347,6 +349,10 @@ _decodeAsRGBA(Imaging im, ImagingCodecState state, TIFF *tiff) {
     for (; state->y < state->ysize; state->y += rows_per_block) {
         img.row_offset = state->y;
         rows_to_read = MIN(rows_per_block, img.height - state->y);
+
+        // Bound and clear the destination for this block so a short decode
+        // cannot expose pixels left over from the previous block.
+        memset(state->buffer, 0, rows_to_read * row_byte_size);
 
         if (!TIFFRGBAImageGet(&img, (UINT32 *)state->buffer, img.width, rows_to_read)) {
             TRACE(("Decode Error, y: %d\n", state->y));
@@ -457,6 +463,12 @@ _decodeTile(
         for (plane = 0; plane < planes; plane++) {
             ImagingShuffler shuffler = unpackers[plane];
             for (x = state->xoff; x < state->xsize; x += tile_width) {
+                // Clear before every tile: a JPEG (or Group 4) tile that decodes
+                // to fewer rows/columns than TileLength/TileWidth still reports
+                // success, and reusing the buffer would otherwise expose the
+                // previous tile's pixels in the uncovered area.
+                memset(state->buffer, 0, tile_bytes_size);
+
                 if (TIFFReadTile(tiff, (tdata_t)state->buffer, x, y, 0, plane) == -1) {
                     TRACE(("Decode Error, Tile at %dx%d\n", x, y));
                     state->errcode = IMAGING_CODEC_BROKEN;
@@ -563,6 +575,15 @@ _decodeStrip(
         int plane;
         for (plane = 0; plane < planes; plane++) {
             ImagingShuffler shuffler = unpackers[plane];
+
+            // Some codecs (e.g. JPEG, Group 4) report success for a strip that
+            // decodes to fewer rows than RowsPerStrip, and TIFFReadEncodedStrip
+            // still returns the full strip size, so the untouched tail keeps the
+            // previous strip's pixels (or realloc garbage). Clear the destination
+            // before every strip so any pixel not covered by decoded data has a
+            // defined value instead of leaking an earlier block.
+            memset(state->buffer, 0, strip_size);
+
             if (TIFFReadEncodedStrip(
                     tiff,
                     TIFFComputeStrip(tiff, state->y, plane),
